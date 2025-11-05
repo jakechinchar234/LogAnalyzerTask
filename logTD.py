@@ -1,9 +1,14 @@
-##################################################
 #********************
 # Jake Chinchar
 # Python Script to find the time difference between the time tag of CM log versus Wireshark log
 # Date last edited: 10/30/2025
 #********************
+
+# Git
+# After making changes to this file run 
+# git status
+# git add logTD.py
+# git commit -m "Describe what you changed
 
 # Required packages:
 # pip install scapy pandas openpyxl beautifulsoup4
