@@ -360,7 +360,7 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
 
                             if log_file_path != False:
                                 # Skip if this hex sequence was already processed in the first iteration
-                                if hex_sequence in [f"{entry[2]} 02 02 {entry[1].split('(')[-1].strip(')')}" for entry in cm_entries if entry[0] != 'did not find']:
+                                if hex_sequence in [f"{entry[2]} 02 02 {entry[1].split('(')[-1].strip(')')}" for entry in cm_entries if entry[0] != 'Not found']:
                                     continue
 
                             pcap_time = datetime.fromtimestamp(float(pkt.time)).strftime('%H:%M:%S.%f')[:-3]
@@ -381,7 +381,7 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
                             recent_sequence_times[hex_sequence] = datetime.fromtimestamp(float(pkt.time))
 
                             if pcap_time not in found_cm_times:
-                                additional_cm_entries.append(['did not find', '', '', '', ''])
+                                additional_cm_entries.append(['Not found', '', '', '', ''])
                                 if log_file_path == False:
                                     ws_hex_data = extract_ws_hex_data(data_bytes)
                                     additional_ws_entries.append([pcap_time, msg_type, msg_number, ws_hex_data, ''])
@@ -397,15 +397,15 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
     time_differences.extend(additional_time_differences)
 
 
-    # Filter out 'did not find' entries with WS time earlier than all WS times from first iteration
-    valid_ws_times = [parse_time_only(entry[0]) for i, entry in enumerate(ws_entries) if cm_entries[i][0] != 'did not find' and entry[0]]
+    # Filter out 'Not found' entries with WS time earlier than all WS times from first iteration
+    valid_ws_times = [parse_time_only(entry[0]) for i, entry in enumerate(ws_entries) if cm_entries[i][0] != 'Not found' and entry[0]]
     if valid_ws_times:
         earliest_ws_time = min(valid_ws_times)
         latest_ws_time = max(valid_ws_times)
         filtered_entries = []
         for i, entry in enumerate(cm_entries):
             ws_time_str = ws_entries[i][0]
-            if entry[0] == 'did not find':
+            if entry[0] == 'Not found':
                 if not ws_time_str:
                     continue  # Skip if WS time is empty
                 try:
@@ -423,16 +423,16 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
         time_differences = [e[2] for e in filtered_entries]
 
 
-    # Rebuild sorted entries based on CM time tag, placing 'did not find' entries before the next WS time
+    # Rebuild sorted entries based on CM time tag, placing 'Not found' entries before the next WS time
     # Step 1: Separate entries
     combined_entries = list(zip(cm_entries, ws_entries, time_differences))
 
     # Step 2: Sort entries with valid CM time tags
-    valid_entries = [e for e in combined_entries if e[0][0] != 'did not find']
+    valid_entries = [e for e in combined_entries if e[0][0] != 'Not found']
     valid_entries.sort(key=lambda x: parse_time_only(x[0][0]))
 
-    # Step 3: Insert 'did not find' entries based on WS time tag
-    did_not_find_entries = [e for e in combined_entries if e[0][0] == 'did not find']
+    # Step 3: Insert 'Not found' entries based on WS time tag
+    did_not_find_entries = [e for e in combined_entries if e[0][0] == 'Not found']
 
     for entry in did_not_find_entries:
         ws_time_str = entry[1][0]
@@ -647,6 +647,16 @@ def run_analysis():
     start_time = start_time_entry.get()
     end_time = end_time_entry.get()
     target_address_hex = target_address_entry.get()
+
+    # Ensure user does not enter an odd number of hexadecimal digits
+    import string
+    def is_valid_hex(s):
+        return len(s) % 2 == 0 and all(c in string.hexdigits for c in s)
+
+    if not is_valid_hex(target_address_hex):
+        messagebox.showerror("Error", "Target address must be even-length and contain only hex characters.")
+        return
+
 
     if not os.path.isfile(pcap_file) or not os.path.isfile(packetswitch_file):
         messagebox.showerror("Error", "Please select valid file paths.")
