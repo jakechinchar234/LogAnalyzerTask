@@ -92,6 +92,24 @@ def is_file_open(filepath):
     except:
         return True
 
+
+
+def extract_ws_hex_data(data_bytes):
+    full_hex_stream = data_bytes.hex()
+    hex_data = ''
+    if '0202128b' in full_hex_stream:
+        idx = full_hex_stream.find('0202128b')
+        data_start = idx + len('0202128b') + 8
+        hex_data = full_hex_stream[data_start:data_start + 44]
+    elif '02021201' in full_hex_stream:
+        idx = full_hex_stream.find('02021201')
+        data_start = idx + len('02021201') + 8
+        hex_data = full_hex_stream[data_start:data_start + 22]
+    formatted_data = ' '.join([hex_data[i:i+2] for i in range(0, len(hex_data), 2)]) if hex_data else ''
+    return formatted_data
+
+
+
 # MAIN FUNCTION that performs log analysis and writes results to Excel
 
 def extract_hex_data(lines, start_index, msg_type_raw):
@@ -268,7 +286,24 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
 
     if log_file_path == False:
         packets = rdpcap(pcap_file_path)
+        # Filter packets based on start time and end time from user given there is no comm manager file
+        try:
+            start_dt = parse_time_only(start_time_str)
+            end_dt = parse_time_only(end_time_str)
+        except Exception as e:
+            messagebox.showerror("Error", f"Invalid time format: {e}")
+            return
 
+        filtered_packets = []
+        for pkt in packets:
+            try:
+                pkt_time = datetime.fromtimestamp(float(pkt.time))
+                pkt_time_only = datetime.strptime(pkt_time.strftime('%H:%M:%S.%f')[:-3], '%H:%M:%S.%f')
+                if start_dt <= pkt_time_only <= end_dt:
+                    filtered_packets.append(pkt)
+            except:
+                continue
+        packets = filtered_packets
 
             # Read packetswitch files
         with open(packetswitch_file_path, 'r', encoding='utf-8') as f:
@@ -346,7 +381,13 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
 
                             if pcap_time not in found_cm_times:
                                 additional_cm_entries.append(['did not find', '', '', '', ''])
-                                additional_ws_entries.append([pcap_time, msg_type, msg_number, '', ''])
+                                if log_file_path == False:
+                                    ws_hex_data = extract_ws_hex_data(data_bytes)
+                                    additional_ws_entries.append([pcap_time, msg_type, msg_number, ws_hex_data, ''])
+
+                                else:
+                                    additional_ws_entries.append([pcap_time, msg_type, msg_number, '', ''])
+                            
                                 additional_time_differences.append([''])
 
     # Append new entries to original lists
