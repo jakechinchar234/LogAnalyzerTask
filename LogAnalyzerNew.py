@@ -1,7 +1,7 @@
 #********************
 # Jake Chinchar
 # Python Script to find the time difference between the time tag of CM log versus Wireshark log
-# Date last edited: 11/5/2025
+# Date last edited: 11/6/2025
 #********************
 
 # Git
@@ -9,6 +9,7 @@
 # git status
 # git add logTD.py
 # git commit -m "Describe what you changed"
+# git push origin main
 
 # Required packages:
 # pip install scapy pandas openpyxl beautifulsoup4
@@ -52,7 +53,7 @@ def is_valid_packet(pkt, data_bytes, target_address):
 # Searches for a matching packet in the pcap file
 def find_pcap_time(search_bytes, log_dt, packets, target_address):
     for pkt in packets:
-        if Raw in pkt and bytes.fromhex('71a3a78a36') in pkt[Raw].load:
+        if Raw in pkt and target_address in pkt[Raw].load:
             data_bytes = pkt[Raw].load
             if search_bytes in data_bytes and target_address in data_bytes and not TCP in pkt:
                 pcap_time = float(pkt.time)
@@ -92,6 +93,24 @@ def is_file_open(filepath):
     except:
         return True
 
+
+
+def extract_ws_hex_data(data_bytes):
+    full_hex_stream = data_bytes.hex()
+    hex_data = ''
+    if '0202128b' in full_hex_stream:
+        idx = full_hex_stream.find('0202128b')
+        data_start = idx + len('0202128b') + 8
+        hex_data = full_hex_stream[data_start:data_start + 44]
+    elif '02021201' in full_hex_stream:
+        idx = full_hex_stream.find('02021201')
+        data_start = idx + len('02021201') + 8
+        hex_data = full_hex_stream[data_start:data_start + 22]
+    formatted_data = ' '.join([hex_data[i:i+2] for i in range(0, len(hex_data), 2)]) if hex_data else ''
+    return formatted_data
+
+
+
 # MAIN FUNCTION that performs log analysis and writes results to Excel
 
 def extract_hex_data(lines, start_index, msg_type_raw):
@@ -124,38 +143,20 @@ def extract_hex_data(lines, start_index, msg_type_raw):
 
     return ' '.join(hex_pairs)
 
-def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, packetswitch_file_path):
+def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, packetswitch_file_path, target_address):
+
     # This is the filter applied
-    target_address = bytes.fromhex('71a3a78a36')  # Target address to match in packets
+    target_address = target_address  # Target address to match in packets
 
-# ****************
-# To allow the file to be written over, edit this section
+    # *********
+    # To allow the file to be written over, edit this section
     output_file_path = 'log_packet_analysis_output.xlsx'
-
     # I was getting errors when I was running this program with the excelfile open
-    # In later editions, I may change the code to allow the file to be overwritten, but for now, I am giving a suggestion to close the file
+        # In later editions, I may change the code to allow the file to be overwritten, but for now, I am giving a suggestion to close the file
     if os.path.exists(output_file_path) and is_file_open(output_file_path):
         messagebox.showerror("Error", "The output file is currently open. Please close it and try again.")
         return
-# *****************
-
-    # Parse start and end time inputs
-    try:
-        start_dt = parse_time_only(start_time_str)
-        end_dt = parse_time_only(end_time_str)
-    except Exception as e:
-        messagebox.showerror("Error", f"Invalid time format: {e}")
-        return
-
-    # Read log and pcap files
-    with open(log_file_path, 'r') as log_file:
-        lines = log_file.readlines()
-    packets = rdpcap(pcap_file_path)
-
-    # Read packetswitch files
-    with open(packetswitch_file_path, 'r', encoding='utf-8') as f:
-        soup = BeautifulSoup(f, 'html.parser')
-        html_text = soup.get_text()
+    # *****************
 
     # Initialize storage for results and tracking
     cm_entries = []  # Communication Manager log entries
@@ -164,103 +165,152 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
     last_two_sequences = []  # Last two hex sequences processed
     recent_sequence_times = {}  # Last timestamp for each hex sequence
 
-    # Process each line in the log file
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        time_match = time_pattern.search(line)
-        if time_match:
-            last_timestamp = time_match.group()
-            try:
-                log_dt = parse_time_only(last_timestamp)
-            except:
-                i += 1
-                continue
-            if not (start_dt <= log_dt <= end_dt):
-                i += 1
-                continue
-        else:
-            i += 1
-            continue
+    if log_file_path != False:
+        
+        # Parse start and end time inputs
+        try:
+            start_dt = parse_time_only(start_time_str)
+            end_dt = parse_time_only(end_time_str)
+        except Exception as e:
+            messagebox.showerror("Error", f"Invalid time format: {e}")
+            return
 
-        # Look for hex sequence pattern '02 02'
-        if '02 02' in line:
-            try:
-                index = line.index('02 02')
-                after = line[index + len('02 02'):].strip()
-                after_parts = after.split()
-                # This is in case the message number is '02'
-                if len(after_parts) >= 3 and after_parts[0] == '02':
-                    msg_number = '02'
-                    msg_type_raw = f"{after_parts[1]} {after_parts[2]}"
-                else:
-                    # This is in all other cases a '02 02' message was found, but the message number is not '02'
-                    pre_match = re.search(r'(\S{2})\s+02\s+02', line)
-                    post_match = re.search(r'02\s+02\s+(\S{2})\s+(\S{2})', line)
-                    msg_number = pre_match.group(1) if pre_match else None
-                    msg_type_raw = f"{post_match.group(1)} {post_match.group(2)}" if post_match else None
-                msg_type = msg_type_raw
-                # Change text for when it is ouputted
-                if msg_type_raw == '12 8B':
-                    msg_type = 'Ind (12 8B)'
-                    # find HEX DATA FOR THE WIRESHARK HERE
-                elif msg_type_raw == '12 01':
-                    msg_type = 'Control (12 01)'
-                    # find HEX DATA FOR THE WIRESHARK HERE 
-                elif msg_type_raw == '12 48':
-                    # MAKE HEX DATA FOR THE WIRESHARK = ''
-                    msg_type = 'Recall (12 48)'
-                # CREATE AN ELSE TO MAKE THE HEX DATA FOR THE WIRESHARK = ''
-                
-                hex_sequence = f"{msg_number} 02 02 {msg_type_raw}" if msg_number and msg_type_raw else None
-            except:
-                i += 1
-                continue
+        # Read log and pcap files
+        with open(log_file_path, 'r') as log_file:
+            lines = log_file.readlines()
+        packets = rdpcap(pcap_file_path)
 
-            # Skip if hex sequence is in last two entries read
-            if not hex_sequence or hex_sequence in last_two_sequences:
-                i += 1
-                continue
+        # Read packetswitch files
+        with open(packetswitch_file_path, 'r', encoding='utf-8') as f:
+            soup = BeautifulSoup(f, 'html.parser')
+            html_text = soup.get_text()
 
-            # Skip if hex sequence was seen in last 5 seconds
-            if hex_sequence in recent_sequence_times:
-                if (log_dt - recent_sequence_times[hex_sequence]) <= timedelta(seconds=5):
+        # Process each line in the log file
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            time_match = time_pattern.search(line)
+            if time_match:
+                last_timestamp = time_match.group()
+                try:
+                    log_dt = parse_time_only(last_timestamp)
+                except:
                     i += 1
                     continue
-            # Convert hex sequence to bytes
-            try:
-                search_bytes = bytes.fromhex(hex_sequence)
-            except:
+                if not (start_dt <= log_dt <= end_dt):
+                    i += 1
+                    continue
+            else:
                 i += 1
                 continue
 
-            # Find matching pcap timestamp
-            pcap_ts_str, time_diff_str, _, ws_hex_data = find_pcap_time(search_bytes, log_dt, packets, target_address)
+            # Look for hex sequence pattern '02 02'
+            if '02 02' in line:
+                try:
+                    index = line.index('02 02')
+                    after = line[index + len('02 02'):].strip()
+                    after_parts = after.split()
+                    # This is in case the message number is '02'
+                    if len(after_parts) >= 3 and after_parts[0] == '02':
+                        msg_number = '02'
+                        msg_type_raw = f"{after_parts[1]} {after_parts[2]}"
+                    else:
+                        # This is in all other cases a '02 02' message was found, but the message number is not '02'
+                        pre_match = re.search(r'(\S{2})\s+02\s+02', line)
+                        post_match = re.search(r'02\s+02\s+(\S{2})\s+(\S{2})', line)
+                        msg_number = pre_match.group(1) if pre_match else None
+                        msg_type_raw = f"{post_match.group(1)} {post_match.group(2)}" if post_match else None
+                    msg_type = msg_type_raw
+                    # Change text for when it is ouputted
+                    if msg_type_raw == '12 8B':
+                        msg_type = 'Ind (12 8B)'
+                        # find HEX DATA FOR THE WIRESHARK HERE
+                    elif msg_type_raw == '12 01':
+                        msg_type = 'Control (12 01)'
+                        # find HEX DATA FOR THE WIRESHARK HERE 
+                    elif msg_type_raw == '12 48':
+                        # MAKE HEX DATA FOR THE WIRESHARK = ''
+                        msg_type = 'Recall (12 48)'
+                    # CREATE AN ELSE TO MAKE THE HEX DATA FOR THE WIRESHARK = ''
+                    
+                    hex_sequence = f"{msg_number} 02 02 {msg_type_raw}" if msg_number and msg_type_raw else None
+                except:
+                    i += 1
+                    continue
 
-            # Does not print entries found with overflow
-            if time_diff_str != "Found but overflow":
-                # Store results
-                hex_data = extract_hex_data(lines, i, msg_type_raw)
-                cm_entries.append([last_timestamp, msg_type, msg_number, hex_data, ''])
-                ws_entries.append([pcap_ts_str or '', msg_type, msg_number, ws_hex_data, ''])
-                time_differences.append([time_diff_str])
+                # Skip if hex sequence is in last two entries read
+                if not hex_sequence or hex_sequence in last_two_sequences:
+                    i += 1
+                    continue
 
-            # Update tracking
-            last_two_sequences.append(hex_sequence)
-            if len(last_two_sequences) > 2:
-                last_two_sequences.pop(0)
-            recent_sequence_times[hex_sequence] = log_dt
+                # Skip if hex sequence was seen in last 5 seconds
+                if hex_sequence in recent_sequence_times:
+                    if (log_dt - recent_sequence_times[hex_sequence]) <= timedelta(seconds=5):
+                        i += 1
+                        continue
+                # Convert hex sequence to bytes
+                try:
+                    search_bytes = bytes.fromhex(hex_sequence)
+                except:
+                    i += 1
+                    continue
 
-        i += 1
+                # Find matching pcap timestamp
+                pcap_ts_str, time_diff_str, _, ws_hex_data = find_pcap_time(search_bytes, log_dt, packets, target_address)
+
+                # Does not print entries found with overflow
+                if time_diff_str != "Found but overflow":
+                    # Store results
+                    hex_data = extract_hex_data(lines, i, msg_type_raw)
+                    cm_entries.append([last_timestamp, msg_type, msg_number, hex_data, ''])
+                    ws_entries.append([pcap_ts_str or '', msg_type, msg_number, ws_hex_data, ''])
+                    time_differences.append([time_diff_str])
+
+                # Update tracking
+                last_two_sequences.append(hex_sequence)
+                if len(last_two_sequences) > 2:
+                    last_two_sequences.pop(0)
+                recent_sequence_times[hex_sequence] = log_dt
+
+            i += 1
 
 
     # SECOND ITERATION: Scan Wireshark for 02 02 codes not found in CM log
     last_rf_ack_time = None
-    found_cm_times = set(entry[0] for entry in cm_entries)
+    if log_file_path == False:
+        found_cm_times = set()
+    else:
+        found_cm_times = set(entry[0] for entry in cm_entries)
     additional_ws_entries = []
     additional_cm_entries = []
     additional_time_differences = []
 
+    if log_file_path == False:
+        packets = rdpcap(pcap_file_path)
+        # Filter packets based on start time and end time from user given there is no comm manager file
+        try:
+            start_dt = parse_time_only(start_time_str)
+            end_dt = parse_time_only(end_time_str)
+        except Exception as e:
+            messagebox.showerror("Error", f"Invalid time format: {e}")
+            return
+
+        filtered_packets = []
+        for pkt in packets:
+            try:
+                pkt_time = datetime.fromtimestamp(float(pkt.time))
+                pkt_time_only = datetime.strptime(pkt_time.strftime('%H:%M:%S.%f')[:-3], '%H:%M:%S.%f')
+                if start_dt <= pkt_time_only <= end_dt:
+                    filtered_packets.append(pkt)
+            except:
+                continue
+        packets = filtered_packets
+
+            # Read packetswitch files
+        with open(packetswitch_file_path, 'r', encoding='utf-8') as f:
+            soup = BeautifulSoup(f, 'html.parser')
+            html_text = soup.get_text()
+        
     for pkt in packets:
         if Raw in pkt:
             data_bytes = pkt[Raw].load
@@ -280,7 +330,7 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
                                 msg_type = 'RF_ACK'
                                 last_rf_ack_time = rf_ack_time
                                 pcap_time = datetime.fromtimestamp(float(pkt.time)).strftime('%H:%M:%S.%f')[:-3]
-                                additional_cm_entries.append(['did not find', '', '', '', ''])
+                                additional_cm_entries.append(['Not found', '', '', '', ''])
                                 additional_ws_entries.append([pcap_time, msg_type, '', '', ''])
                                 additional_time_differences.append([''])
                                 break
@@ -307,13 +357,14 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
                                 msg_type = 'Recall (12 48)'
                             hex_sequence = f"{msg_number} 02 02 {msg_type_raw}" if msg_number and msg_type_raw else None
 
-                            
-                            # Skip if this hex sequence was already processed in the first iteration
-                            if hex_sequence in [f"{entry[2]} 02 02 {entry[1].split('(')[-1].strip(')')}" for entry in cm_entries if entry[0] != 'did not find']:
-                                continue
+
+                            if log_file_path != False:
+                                # Skip if this hex sequence was already processed in the first iteration
+                                if hex_sequence in [f"{entry[2]} 02 02 {entry[1].split('(')[-1].strip(')')}" for entry in cm_entries if entry[0] != 'did not find']:
+                                    continue
 
                             pcap_time = datetime.fromtimestamp(float(pkt.time)).strftime('%H:%M:%S.%f')[:-3]
-                            
+
                             # Skip if hex sequence is in last two entries
                             if not hex_sequence or hex_sequence in last_two_sequences:
                                 continue
@@ -331,7 +382,13 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
 
                             if pcap_time not in found_cm_times:
                                 additional_cm_entries.append(['did not find', '', '', '', ''])
-                                additional_ws_entries.append([pcap_time, msg_type, msg_number, '', ''])
+                                if log_file_path == False:
+                                    ws_hex_data = extract_ws_hex_data(data_bytes)
+                                    additional_ws_entries.append([pcap_time, msg_type, msg_number, ws_hex_data, ''])
+
+                                else:
+                                    additional_ws_entries.append([pcap_time, msg_type, msg_number, '', ''])
+                            
                                 additional_time_differences.append([''])
 
     # Append new entries to original lists
@@ -583,17 +640,23 @@ def browse_packetswitch_file():
 
 # First function ran after the user selects run_analysis
 def run_analysis():
+    has_log = True
     log_file = log_file_entry.get()
     pcap_file = pcap_file_entry.get()
     packetswitch_file = packetswitch_file_entry.get()
     start_time = start_time_entry.get()
     end_time = end_time_entry.get()
+    target_address_hex = target_address_entry.get()
 
-    if not os.path.isfile(log_file) or not os.path.isfile(pcap_file) or not os.path.isfile(packetswitch_file):
+    if not os.path.isfile(pcap_file) or not os.path.isfile(packetswitch_file):
         messagebox.showerror("Error", "Please select valid file paths.")
         return
 
-    analyze_logs(log_file, pcap_file, start_time, end_time, packetswitch_file)
+    if not log_file:
+        has_log = False
+        analyze_logs(has_log, pcap_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex))   
+    else: 
+        analyze_logs(log_file, pcap_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex))
 
 # ********** Everything above this point is functions and libraries **********
 
@@ -624,9 +687,14 @@ tk.Label(root, text="End Time for CM Log (HH:MM:SS.sss):").grid(row=4, column=0,
 end_time_entry = tk.Entry(root, width=20)
 end_time_entry.grid(row=4, column=1, sticky="w", padx=10)
 
-tk.Button(root, text="Run Analysis", command=run_analysis, bg="green", fg="white").grid(row=5, column=1, pady=20)
+tk.Label(root, text="Target Address (Hex):").grid(row=5, column=0, sticky="w", padx=10, pady=5)
+target_address_entry = tk.Entry(root, width=20)
+target_address_entry.grid(row=5, column=1, sticky="w", padx=10)
 
-tk.Label(root, text="Output will be saved to: log_packet_analysis_output.xlsx\nYou will receive a message that the Excel file is ready to be viewed", fg="blue").grid(row=6, column=0, columnspan=3, pady=10)
+tk.Button(root, text="Run Analysis", command=run_analysis, bg="green", fg="white").grid(row=6, column=1, pady=20)
+tk.Label(root, text="To find the address, copy the source or destination address as hexstream. Then, remove the last 4 hexadecimal digits (ex. 71a3a78a36a2a2 -> 71a3a78a36)", fg="purple").grid(row=7, column=0, columnspan=3, pady=10)
+
+tk.Label(root, text="Output will be saved to: log_packet_analysis_output.xlsx\nYou will receive a message that the Excel file is ready to be viewed", fg="blue").grid(row=8, column=0, columnspan=3, pady=10)
 
 # Start the UI event loop
 root.mainloop()
