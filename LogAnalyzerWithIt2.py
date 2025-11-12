@@ -16,28 +16,35 @@
 # git commit -m "Describe what was changed"
 # git push origin main
 
-# Required packages:
-# pip install scapy pandas openpyxl beautifulsoup4
+# Required external packages:
+# pip install scapy pandas openpyxl beautifulsoup4 python-docx
+
+# Built-in modules: tkinter, datetime, re, os
 
 # Import necessary libraries
-import tkinter as tk
-from tkinter import filedialog, messagebox
-from scapy.all import rdpcap, Raw
-from scapy.layers.inet import TCP
-from datetime import datetime, timedelta
-import re
-import os
-import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.styles import Alignment
-from openpyxl.utils import get_column_letter
-from bs4 import BeautifulSoup
-
+import tkinter as tk                            # For GUI
+from tkinter import filedialog, messagebox      # filedialog for opening/saving files, messagebox for error alerts and success notifs
+from scapy.all import rdpcap, Raw               # Read packets from pcap file
+from scapy.layers.inet import TCP               # To identify TCP packets
+from datetime import datetime, timedelta        # For dates and times
+import re                                       # Pattern matching & parsing
+import os                                       # Operating system functions
+import pandas as pd                             # For dataframes
+from openpyxl import load_workbook              # To write to and modify excel files
+from openpyxl.styles import Alignment           # For excel alignment
+from openpyxl.utils import get_column_letter    # Converts column index to Excel column letters
+from bs4 import BeautifulSoup                   # To read HTML files
+from docx import Document                       # To read .docx
+            
 # Expression to extract time tags from log lines (e.g., 12:34:56.78)
 time_pattern = re.compile(r'\b\d{2}:\d{2}:\d{2}\.\d{2}\b')
 
 # Converts a time string to a datetime object
 def parse_time_only(ts_str):
+    # Add a .0 if no decimal added
+    if '.' not in ts_str:
+        ts_str += '.0'
+
     # Hours:Minutes:Seconds.Decimal
     return datetime.strptime(ts_str, '%H:%M:%S.%f')
 
@@ -184,9 +191,26 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
         packets = rdpcap(pcap_file_path)
 
         # Read packetswitch files using Beautiful soup
-        with open(packetswitch_file_path, 'r', encoding='utf-8') as f:
-            soup = BeautifulSoup(f, 'html.parser')
-            html_text = soup.get_text()
+        html_text = ""
+        if packetswitch_file_path.lower().endswith(".html"):
+            with open(packetswitch_file_path, 'r', encoding='utf-8') as f:
+                soup = BeautifulSoup(f, 'html.parser')
+                html_text = soup.get_text()
+        
+        elif packetswitch_file_path.lower().endswith(".docx"):
+            # Before reading packetswitch file
+            # Ensures packetswitch file is not open
+            if is_file_open(packetswitch_file_path):
+                messagebox.showerror("Error", "The Packetswitch file is currently open. Please close it and try again.")
+                return
+
+            try:
+                from docx import Document
+                html_text = "\n".join([para.text for para in Document(packetswitch_file_path).paragraphs])
+            except:
+                with open(packetswitch_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    html_text = f.read()
+
 
         # Process each line in the log file
         i = 0
@@ -308,9 +332,25 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
         packets = filtered_packets
 
         # Read packetswitch files
-        with open(packetswitch_file_path, 'r', encoding='utf-8') as f:
-            soup = BeautifulSoup(f, 'html.parser')
-            html_text = soup.get_text()
+        html_text = ""
+        if packetswitch_file_path.lower().endswith(".html"):
+            with open(packetswitch_file_path, 'r', encoding='utf-8') as f:
+                soup = BeautifulSoup(f, 'html.parser')
+                html_text = soup.get_text()
+        
+        elif packetswitch_file_path.lower().endswith(".docx"):  
+            # Before reading packetswitch file
+            if is_file_open(packetswitch_file_path):
+                messagebox.showerror("Error", "The Packetswitch file is currently open. Please close it and try again.")
+                return
+
+            try:
+                from docx import Document
+                html_text = "\n".join([para.text for para in Document(packetswitch_file_path).paragraphs])
+            except:
+                with open(packetswitch_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    html_text = f.read()
+
         
     for pkt in packets:
         if Raw in pkt:
@@ -721,9 +761,13 @@ def browse_pcap_file():
     pcap_file_entry.insert(0, filename)
 
 def browse_packetswitch_file():
-    filename = filedialog.askopenfilename(title="Select Packetswitch HTML File", filetypes=[("HTML Files", "*.html")])
+    filename = filedialog.askopenfilename(
+        title="Select Packetswitch File",
+        filetypes=[("HTML or DOCX Files", "*.html *.docx")]
+    )
     packetswitch_file_entry.delete(0, tk.END)
     packetswitch_file_entry.insert(0, filename)
+
 
 # First function ran after the user selects run_analysis
 def run_analysis():
