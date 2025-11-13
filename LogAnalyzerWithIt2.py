@@ -116,11 +116,7 @@ def is_file_open(filepath):
 
 
 def extract_ws_hex_data(pcap_path: str, ws_time_tag: str, msg_type_raw: str, fallback_hex: str = '') -> str:
-    """
-    Extract indication/control bits from Wireshark packet details using tshark.
-    Falls back to provided raw hex if tshark or field not found.
-    """
-    import subprocess, json, re
+
     # Decide which field to look for
     if msg_type_raw == '12 8B':
         wanted_label = 'indication_bits'
@@ -183,8 +179,7 @@ def extract_ws_hex_data(pcap_path: str, ws_time_tag: str, msg_type_raw: str, fal
 
 
 # Helper function to process Wireshark hex data
-# It searches for '02 02 12 8B' or '02 02 12 01', removes everything before and including that sequence,
-# then removes the next four hex pairs.
+# It searches for '02 02 12 8B' or '02 02 12 01', removes everything before and including that sequence, then removes the next four hex pairs.
 def process_ws_hex_data(ws_hex_data: str, msg_type_raw: str) -> str:
     if not ws_hex_data:
         return ws_hex_data
@@ -202,7 +197,7 @@ def process_ws_hex_data(ws_hex_data: str, msg_type_raw: str) -> str:
     # Remove next four pairs if available
     trimmed = trimmed[4:] if len(trimmed) > 4 else []
 
-    
+    # If the message type is 12 8b, then the last hexadecimal pair needs to be removed
     if msg_type_raw == '12 8B' and len(trimmed) > 0:
         trimmed = trimmed[:-1]
 
@@ -614,195 +609,210 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
     ws_df = pd.DataFrame(ws_entries, columns=["time tag", "msg type (Hex)", "msg number (Hex)", "data (hex)", "UDP/TCP"])
     diff_df = pd.DataFrame(time_differences, columns=[" "])
 
-    # Detect if packetswitch file contains 'Generic Report Results'
-    is_generic_report = 'Generic Report Results' in html_text
 
-    if not is_generic_report: # Not raw data packetswitch file
-        
-        # Packetswitch integration
-        packetswitch_times, packetswitch_codes = [], []
-        packetswitch_count = {}
+    # If packetswitch file is not provided or invalid, skip parsing
+    if not packetswitch_file_path or not os.path.isfile(packetswitch_file_path):
+        html_text = ''
+    else:
+        # Detect if packetswitch file contains 'Generic Report Results'
+        is_generic_report = 'Generic Report Results' in html_text
 
-        exit_bool = False
-        for entry in ws_entries:
-            msg_type_raw = entry[1].split('(')[-1].strip(')') if '(' in entry[1] else entry[1]
-            if msg_type_raw not in ['12 8B', '12 01', '12 48']:
-                packetswitch_times.append('')
-                packetswitch_codes.append('')
-                continue
-            pcap_time = entry[0]
-            msg_type = entry[1]
-            code = ''
-
-            if pcap_time:
-                time_tag = pcap_time.split('.')[0]
-                key = (time_tag, msg_type)
-                count = packetswitch_count.get(key, 0)
-                idx = -1
-
-                for _ in range(count + 1):
-                    idx = html_text.find(time_tag, idx + 1)
-                    if idx == -1:
-                        break
-
-                if idx != -1:
-                    after = html_text[idx:]
-                    underscore_idx = after.find('_')
-                    if underscore_idx != -1 and len(after) > underscore_idx + 2:
-                        raw_code = after[underscore_idx + 1:underscore_idx + 3]
-                        if raw_code == "CR" and msg_type == "Control (12 01)":
-                            code = "Control"
-                        elif raw_code == "IR" and msg_type == "Ind (12 8B)":
-                            code = "Ind"
-                        elif raw_code == "R_" and msg_type == "Recall (12 48)":
-                            code = "Recall"
-
-                if code:
-                    packetswitch_times.append(time_tag)
-                    packetswitch_codes.append(code)
-                    packetswitch_count[key] = count + 1
-                    exit_bool = True
-                else:
-                    exit_bool = False
-            # Determine if the tenth digit of the pcap timestamp is '9'
-            # Some entrie where the pcap timestamp is '9' have a matching entry in the next second
-            tenth_digit_is_nine = False
+        if not is_generic_report: # Not raw data packetswitch file
             
-            try:
-                fractional = pcap_time.split('.')[-1]
-                if len(fractional) >= 1 and fractional[0] == '9':
-                    tenth_digit_is_nine = True
-            except:
-                pass
+            # Packetswitch integration
+            packetswitch_times, packetswitch_codes = [], []
+            packetswitch_count = {}
 
+            exit_bool = False
+            for entry in ws_entries:
+                msg_type_raw = entry[1].split('(')[-1].strip(')') if '(' in entry[1] else entry[1]
+                if msg_type_raw not in ['12 8B', '12 01', '12 48']:
+                    packetswitch_times.append('')
+                    packetswitch_codes.append('')
+                    continue
+                pcap_time = entry[0]
+                msg_type = entry[1]
+                code = ''
 
-            # If no match found and tenth digit is 9, try again with +1 second
-            if not code and tenth_digit_is_nine:
-                adjusted_time = (datetime.strptime(time_tag, '%H:%M:%S') + timedelta(seconds=1)).strftime('%H:%M:%S')
-                key = (adjusted_time, msg_type)
-                count = packetswitch_count.get(key, 0)
-                idx = -1
-                for _ in range(count + 1):
-                    idx = html_text.find(adjusted_time, idx + 1)
-                    if idx == -1:
-                        break
-                if idx != -1:
-                    after = html_text[idx:]
-                    underscore_idx = after.find('_')
-                    if underscore_idx != -1 and len(after) > underscore_idx + 2:
-                        raw_code = after[underscore_idx + 1:underscore_idx + 3]
-                        if raw_code == "CR" and msg_type == "Control (12 01)":
-                            code = "Control"
-                        elif raw_code == "IR" and msg_type == "Ind (12 8B)":
-                            code = "Ind"
-                        elif raw_code == "R_" and msg_type == "Recall (12 48)":
-                            code = "Recall"
-                exit_bool = False
-                if code:
-                    # packetswitch_times[-1] = adjusted_time
-                    # packetswitch_codes[-1] = code
-                    # packetswitch_count[key] = count + 1
-                    # exit_bool = True
-                    packetswitch_times.append(adjusted_time)
-                    packetswitch_codes.append(code)
-                    packetswitch_count[key] = count + 1
-                    exit_bool = True
-                    
-            if exit_bool == False:
-                packetswitch_times.append('')
-                packetswitch_codes.append('')
+                if pcap_time:
+                    time_tag = pcap_time.split('.')[0]
+                    key = (time_tag, msg_type)
+                    count = packetswitch_count.get(key, 0)
+                    idx = -1
 
-    
-    if is_generic_report: # Now if there is a raw data file
-        packetswitch_times = []
-        packetswitch_components = []
-        packetswitch_codes = [] # Stores descriptive text
-        packetswitch_data = []  # Matched hex data
+                    for _ in range(count + 1):
+                        idx = html_text.find(time_tag, idx + 1)
+                        if idx == -1:
+                            break
 
+                    if idx != -1:
+                        after = html_text[idx:]
+                        underscore_idx = after.find('_')
+                        if underscore_idx != -1 and len(after) > underscore_idx + 2:
+                            raw_code = after[underscore_idx + 1:underscore_idx + 3]
+                            if raw_code == "CR" and msg_type == "Control (12 01)":
+                                code = "Control"
+                            elif raw_code == "IR" and msg_type == "Ind (12 8B)":
+                                code = "Ind"
+                            elif raw_code == "R_" and msg_type == "Recall (12 48)":
+                                code = "Recall"
 
-        # Parse packetswitch lines differently for Generic Report Results
-        ps_lines = html_text.strip().split('\n')
-        parsed_ps_lines = []
-        for line in ps_lines:
-            # Capture time, descriptive text, and hex data
-            match = re.match(r".*?(\d{2}:\d{2}:\d{2})\s+([A-Za-z()]+)\s.*?:\s*([0-9A-Fa-f ]+)$", line)
-            if match:
-                time_tag = match.group(1)
-                description = match.group(2)  # Text after time tag and before next number
-                data = match.group(3).strip()
-                parsed_ps_lines.append((time_tag, description, data))
-
-        # For each Wireshark entry, check for matching data
-        for ws_entry in ws_entries:
-            ws_time_str = ws_entry[0].split('.')[0]  # Extract HH:MM:SS
-            try:
-                ws_time = datetime.strptime(ws_time_str, '%H:%M:%S')
-            except:
-                ws_time = None
-
-            # Normalize Wireshark data: remove spaces, uppercase, and trim last two hex digits
-            ws_data = ws_entry[3].replace(" ", "").upper()
-
-            found_match = False
-            for time_tag, description, ps_data in parsed_ps_lines:
-                ps_data_clean = ps_data.replace(" ", "").upper()
-
-                # Check if packetswitch data starts with Wireshark trimmed data
-                if ps_data_clean.startswith(ws_data):
-                    try:
-                        ps_time = datetime.strptime(time_tag, '%H:%M:%S')
-                        time_diff = abs((ps_time - ws_time).total_seconds()) if ws_time else None
-                    except:
-                        time_diff = None
-
-                    # Ensure time difference is within ±1 second
-                    if time_diff is not None and time_diff <= 1:
-                        if description == 'Indic(RF)':
-                            if ws_entry[1] != 'Ind (12 8B)':   
-                                continue
-                            else:
-                                description = 'Ind'
-                        
-                        if description == 'Rf':
-                            if ws_entry[1] != 'Control (12 01)':
-                                continue  # Skip this packetswitch line
-                            else:
-                                description = 'Control'
-
-                        if description == 'Indicate':
-                            continue
-                        
+                    if code:
                         packetswitch_times.append(time_tag)
-                        packetswitch_components.append('')
-                        packetswitch_codes.append(description) # Store descriptive text
-                        packetswitch_data.append(ps_data)
-                        found_match = True
-                        break
+                        packetswitch_codes.append(code)
+                        packetswitch_count[key] = count + 1
+                        exit_bool = True
+                    else:
+                        exit_bool = False
+                # Determine if the tenth digit of the pcap timestamp is '9'
+                # Some entrie where the pcap timestamp is '9' have a matching entry in the next second
+                tenth_digit_is_nine = False
+                
+                try:
+                    fractional = pcap_time.split('.')[-1]
+                    if len(fractional) >= 1 and fractional[0] == '9':
+                        tenth_digit_is_nine = True
+                except:
+                    pass
 
-            # If no match found, append empty placeholders
-            if not found_match:
-                packetswitch_times.append('')
-                packetswitch_components.append('')
-                packetswitch_codes.append('')
-                packetswitch_data.append('')
+
+                # If no match found and tenth digit is 9, try again with +1 second
+                if not code and tenth_digit_is_nine:
+                    adjusted_time = (datetime.strptime(time_tag, '%H:%M:%S') + timedelta(seconds=1)).strftime('%H:%M:%S')
+                    key = (adjusted_time, msg_type)
+                    count = packetswitch_count.get(key, 0)
+                    idx = -1
+                    for _ in range(count + 1):
+                        idx = html_text.find(adjusted_time, idx + 1)
+                        if idx == -1:
+                            break
+                    if idx != -1:
+                        after = html_text[idx:]
+                        underscore_idx = after.find('_')
+                        if underscore_idx != -1 and len(after) > underscore_idx + 2:
+                            raw_code = after[underscore_idx + 1:underscore_idx + 3]
+                            if raw_code == "CR" and msg_type == "Control (12 01)":
+                                code = "Control"
+                            elif raw_code == "IR" and msg_type == "Ind (12 8B)":
+                                code = "Ind"
+                            elif raw_code == "R_" and msg_type == "Recall (12 48)":
+                                code = "Recall"
+                    exit_bool = False
+                    if code:
+                        # packetswitch_times[-1] = adjusted_time
+                        # packetswitch_codes[-1] = code
+                        # packetswitch_count[key] = count + 1
+                        # exit_bool = True
+                        packetswitch_times.append(adjusted_time)
+                        packetswitch_codes.append(code)
+                        packetswitch_count[key] = count + 1
+                        exit_bool = True
+                        
+                if exit_bool == False:
+                    packetswitch_times.append('')
+                    packetswitch_codes.append('')
+
+        
+        if is_generic_report: # Now if there is a raw data file
+            packetswitch_times = []
+            packetswitch_components = []
+            packetswitch_codes = [] # Stores descriptive text
+            packetswitch_data = []  # Matched hex data
 
 
-    if is_generic_report:
-        # Create dataframe for Packetswitch (raw ps)
+            # Parse packetswitch lines differently for Generic Report Results
+            ps_lines = html_text.strip().split('\n')
+            parsed_ps_lines = []
+            for line in ps_lines:
+                # Capture time, descriptive text, and hex data
+                match = re.match(r".*?(\d{2}:\d{2}:\d{2})\s+([A-Za-z()]+)\s.*?:\s*([0-9A-Fa-f ]+)$", line)
+                if match:
+                    time_tag = match.group(1)
+                    description = match.group(2)  # Text after time tag and before next number
+                    data = match.group(3).strip()
+                    parsed_ps_lines.append((time_tag, description, data))
+
+            # For each Wireshark entry, check for matching data
+            for ws_entry in ws_entries:
+                ws_time_str = ws_entry[0].split('.')[0]  # Extract HH:MM:SS
+                try:
+                    ws_time = datetime.strptime(ws_time_str, '%H:%M:%S')
+                except:
+                    ws_time = None
+
+                # Normalize Wireshark data: remove spaces, uppercase, and trim last two hex digits
+                ws_data = ws_entry[3].replace(" ", "").upper()
+
+                found_match = False
+                for time_tag, description, ps_data in parsed_ps_lines:
+                    ps_data_clean = ps_data.replace(" ", "").upper()
+
+                    # Check if packetswitch data starts with Wireshark trimmed data
+                    if ps_data_clean.startswith(ws_data):
+                        try:
+                            ps_time = datetime.strptime(time_tag, '%H:%M:%S')
+                            time_diff = abs((ps_time - ws_time).total_seconds()) if ws_time else None
+                        except:
+                            time_diff = None
+
+                        # Ensure time difference is within ±1 second
+                        if time_diff is not None and time_diff <= 1:
+                            if description == 'Indic(RF)':
+                                if ws_entry[1] != 'Ind (12 8B)':   
+                                    continue
+                                else:
+                                    description = 'Ind'
+                            
+                            if description == 'Rf':
+                                if ws_entry[1] != 'Control (12 01)':
+                                    continue  # Skip this packetswitch line
+                                else:
+                                    description = 'Control'
+
+                            if description == 'Indicate':
+                                continue
+                            
+                            packetswitch_times.append(time_tag)
+                            packetswitch_components.append('')
+                            packetswitch_codes.append(description) # Store descriptive text
+                            packetswitch_data.append(ps_data)
+                            found_match = True
+                            break
+
+                # If no match found, append empty placeholders
+                if not found_match:
+                    packetswitch_times.append('')
+                    packetswitch_components.append('')
+                    packetswitch_codes.append('')
+                    packetswitch_data.append('')
+
+
+        if is_generic_report:
+            # Create dataframe for Packetswitch (raw ps)
+            packetswitch_df = pd.DataFrame({
+                "time tag": packetswitch_times,
+                "component": [''] * len(packetswitch_times),  # keep empty
+                "data (hex)": packetswitch_data,        # hex data here
+                "data type": packetswitch_codes
+            })
+        else:       
+            # Create dataframe for Packetswitch (readable ps)
+            packetswitch_df = pd.DataFrame({
+                "time tag": packetswitch_times,
+                "component": [''] * len(packetswitch_times),
+                "data (hex)": [''] * len(packetswitch_times), # no hex data available
+                "data type": packetswitch_codes
+            })
+    
+    # If html_text is empty, create empty packetswitch dataframe
+    if not html_text.strip():
         packetswitch_df = pd.DataFrame({
-            "time tag": packetswitch_times,
-            "component": [''] * len(packetswitch_times),  # keep empty
-            "data (hex)": packetswitch_data,        # hex data here
-            "data type": packetswitch_codes
+            "time tag": [''] * len(ws_entries),
+            "component": [''] * len(ws_entries),
+            "data (hex)": [''] * len(ws_entries),
+            "data type": [''] * len(ws_entries)
         })
-    else:       
-        # Create dataframe for Packetswitch (readable ps)
-        packetswitch_df = pd.DataFrame({
-            "time tag": packetswitch_times,
-            "component": [''] * len(packetswitch_times),
-            "data (hex)": [''] * len(packetswitch_times), # no hex data available
-            "data type": packetswitch_codes
-        })
+
 
     # Combine all data into one dataframe with 'Number' column at the far left
     combined_df = pd.concat([
@@ -900,10 +910,11 @@ def run_analysis():
         messagebox.showerror("Error", "Target address must be even-length and contain only hex characters.")
         return
 
-
-    if not os.path.isfile(pcap_file) or not os.path.isfile(packetswitch_file):
-        messagebox.showerror("Error", "Please select valid file paths.")
+    if not os.path.isfile(pcap_file):
+        messagebox.showerror("Error", "Please select a valid PCAP file path.")
         return
+    # Packetswitch file is optional, so no error if missing
+    
 
     if not log_file:
         has_log = False
