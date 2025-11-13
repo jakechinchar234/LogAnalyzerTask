@@ -241,7 +241,7 @@ def extract_hex_data(lines, start_index, msg_type_raw):
 
     return ' '.join(hex_pairs)
 
-def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, packetswitch_file_path, target_address):
+def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, packetswitch_file_path, target_address, filename_suffix):
 
     # This is the filter applied
     target_address = target_address  # Target address to match in packets
@@ -249,8 +249,8 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
     # Changes wanted for later
     # Add file to be rewritten
     # Allow user to name ending of ouput filename after log_packet_analysis
-    output_file_path = 'log_packet_analysis_outputComp.xlsx'
-    
+    output_file_path = f"log_packet_analysis_output_{filename_suffix or datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"    
+
     if os.path.exists(output_file_path) and is_file_open(output_file_path):
         messagebox.showerror("Error", "The output file is currently open. Please close it and try again.")
         return
@@ -907,9 +907,9 @@ def run_analysis():
 
     if not log_file:
         has_log = False
-        analyze_logs(has_log, pcap_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex))   
+        analyze_logs(has_log, pcap_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex), filename_suffix_entry.get())   
     else: 
-        analyze_logs(log_file, pcap_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex))
+        analyze_logs(log_file, pcap_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex), filename_suffix_entry.get())
 
 # ********** Everything above this point is functions and libraries **********
 
@@ -944,10 +944,13 @@ tk.Label(root, text="Target Address:").grid(row=5, column=0, sticky="w", padx=10
 target_address_entry = tk.Entry(root, width=20)
 target_address_entry.grid(row=5, column=1, sticky="w", padx=10)
 
-tk.Button(root, text="Run Analysis", command=run_analysis, bg="green", fg="white").grid(row=6, column=1, pady=20)
-tk.Label(root, text="Enter the Target Address in any format", fg="purple").grid(row=7, column=0, columnspan=3, pady=10)
+tk.Label(root, text="Output suffix after 'log_packet_analysis_output':").grid(row=6, column=0, sticky="w", padx=10, pady=5)
+filename_suffix_entry = tk.Entry(root, width=20)
+filename_suffix_entry.grid(row=6, column=1, sticky="w", padx=10)
 
-tk.Label(root, text="Output will be saved to: log_packet_analysis_output.xlsx\nYou will receive a message that the Excel file is ready to be viewed", fg="blue").grid(row=8, column=0, columnspan=3, pady=10)
+tk.Button(root, text="Run Analysis", command=run_analysis, bg="green", fg="white").grid(row=7, column=1, pady=20)
+
+tk.Label(root, text="You will receive a message that the Excel file is ready to be viewed. This may take a few minutes", fg="blue").grid(row=8, column=0, columnspan=3, pady=10)
 
 # Start the UI event loop
 root.mainloop()
