@@ -3,7 +3,7 @@
 # Jake Chinchar
 # Purpose: Analyze Communication Manager logs, Wireshark PCAP files, and Packetswitch HTML reports to correlate message flows.
 # Output: Generates a formatted Excel report summarizing findings
-# Date last edited: 11/12/2025
+# Date last edited: 11/13/2025
 #=====================================================
 
 # Filters for WS
@@ -205,36 +205,60 @@ def process_ws_hex_data(ws_hex_data: str, msg_type_raw: str) -> str:
 
 
 
-# MAIN FUNCTION that performs log analysis and writes results to Excel
-def extract_hex_data(lines, start_index, msg_type_raw):
-    hex_pairs = []
+
+def extract_hex_data(lines, start_index, msg_type_raw, line_type):
+    """
+    New logic:
+    1. After finding '02 02 12 8B' or '02 02 12 01', remove first 2 hex pairs.
+    2. Take the next (third) hex pair after message type, convert to binary.
+    3. Remove first 2 bits from that binary value.
+    4. Use remaining bits as length (in hex pairs).
+    5. Trim collected hex pairs to match this length.
+    """
+    collected = []
+    found_sequence = False
+    sequence_patterns = [['02', '02', '12', '8B'], ['02', '02', '12', '01']]
+
     i = start_index
-    while i < len(lines) and len(hex_pairs) < 36:  # 4 to skip + 22 to collect
-        line = lines[i]
-        if 'BASIC' in line or 'INFO' in line:
-            parts = line.strip().split()
-            try:
-                idx = parts.index('BASIC') if 'BASIC' in parts else parts.index('INFO')
-                hex_candidates = parts[idx + 1:]
-                for part in hex_candidates:
-                    if part in ['TX', 'RX']:
-                        break
-                    if re.fullmatch(r'[0-9A-Fa-f]{2}', part):
-                        hex_pairs.append(part)
-            except ValueError:
-                pass
+    while i < len(lines):
+        tokens = lines[i].strip().split()
+        joined_line = ' '.join(tokens).upper()
+        if ' TX' in joined_line or ' RX' in joined_line or 'TX:' in joined_line or 'RX:' in joined_line:
+            break
+
+        if not found_sequence:
+            for j in range(len(tokens) - 3):
+                if tokens[j:j+4] in sequence_patterns:
+                    found_sequence = True
+                    collected.extend([t for t in tokens[j+4:] if re.fullmatch(r'[0-9A-Fa-f]{2}', t)])
+                    break
+        else:
+            collected.extend([t for t in tokens if re.fullmatch(r'[0-9A-Fa-f]{2}', t)])
+
         i += 1
 
-    hex_pairs = hex_pairs[13:35]  # Skip first 4, take next 22
+    if not found_sequence or len(collected) < 3:
+        return ''
 
-    if msg_type_raw == '12 8B':
-        hex_pairs = hex_pairs[:22]
-    elif msg_type_raw == '12 01':
-        hex_pairs = hex_pairs[:11]
-    else:
-        hex_pairs = ''
+    # Remove first 2 pairs
+    collected = collected[2:]
 
-    return ' '.join(hex_pairs)
+    # Get third pair (now first after removal) for length calculation
+    length_hex = collected[0]
+    length_bin = bin(int(length_hex, 16))[2:].zfill(8)  # Convert to 8-bit binary
+    length_bin_trimmed = length_bin[2:]  # Remove first 2 bits
+    length_val = int(length_bin_trimmed, 2)  # Convert back to int
+
+    # Remove the length byte itself from data
+    collected = collected[2:]
+
+    # Trim to required length
+    if len(collected) > length_val:
+        collected = collected[:length_val]
+
+    return ' '.join(collected)
+
+
 
 def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, packetswitch_file_path, target_address, filename_suffix):
 
@@ -330,6 +354,10 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
                         post_match = re.search(r'02\s+02\s+(\S{2})\s+(\S{2})', line)
                         msg_number = pre_match.group(1) if pre_match else None
                         msg_type_raw = f"{post_match.group(1)} {post_match.group(2)}" if post_match else None
+                        
+                        # Determine line type
+                        line_type = "BASIC" if "BASIC" in line else "INFO" if "INFO" in line else ""
+
                     msg_type = msg_type_raw
                     if msg_type_raw == '12 8B':
                         msg_type = 'Ind (12 8B)'
@@ -366,7 +394,7 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
                 # Does not print entries found with overflow
                 if time_diff_str != "Found but overflow":
                     # Store results
-                    hex_data = extract_hex_data(lines, i, msg_type_raw)
+                    hex_data = extract_hex_data(lines, i, msg_type_raw, line_type)
                     cm_entries.append([last_timestamp, msg_type, msg_number, hex_data, ''])
                     ws_entries.append([pcap_ts_str or '', msg_type, msg_number, ws_hex_data, ''])
                     time_differences.append([time_diff_str])
