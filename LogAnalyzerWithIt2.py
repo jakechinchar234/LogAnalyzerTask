@@ -260,7 +260,7 @@ def extract_hex_data(lines, start_index, msg_type_raw, line_type):
 
 
 
-def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, packetswitch_file_path, target_address, filename_suffix):
+def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, end_time_str, packetswitch_file_path, target_address, filename_suffix):
 
     # This is the filter applied
     target_address = target_address  # Target address to match in packets
@@ -633,8 +633,24 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
 
 
     # Create dataframes for Excel Output
-    cm_df = pd.DataFrame(cm_entries, columns=["time tag", "msg type (Hex)", "msg number (Hex)", "data (hex)", "direction"])
-    ws_df = pd.DataFrame(ws_entries, columns=["time tag", "msg type (Hex)", "msg number (Hex)", "data (hex)", "UDP/TCP"])
+    row_count = len(cm_entries)  # keep alignment across sections
+    
+    ixl_df = pd.DataFrame({
+        "time tag":     [''] * row_count,
+        "msg type":     [''] * row_count,
+        "data (hex)":   [''] * row_count,
+        "direction":    [''] * row_count,
+        "component":    [''] * row_count,
+    })
+
+
+    # 2) The first Time Difference (between IXL and CM) should be empty
+    diff2_df = pd.DataFrame({" ": [''] * row_count})
+
+    # Should use this for ixl dataframe in the future
+    # ixl_df = pd.DataFrame(ixl_entries, columns=["time tag", "msg type", "data (hex)", "direction", "component"])
+    cm_df = pd.DataFrame(cm_entries, columns=["time tag", "msg type", "msg number", "data (hex)", "direction"])
+    ws_df = pd.DataFrame(ws_entries, columns=["time tag", "msg type", "msg number", "data (hex)", "UDP/TCP"])
     diff_df = pd.DataFrame(time_differences, columns=[" "])
 
 
@@ -845,12 +861,14 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
     # Combine all data into one dataframe with 'Number' column at the far left
     combined_df = pd.concat([
         pd.DataFrame({"Number": list(range(1, len(cm_df) + 1))}),  # New column added here
-        cm_df, diff_df, ws_df, packetswitch_df
+        ixl_df, diff2_df, cm_df, diff_df, ws_df, packetswitch_df
     ], axis=1)
 
     # Create header row for excel
     header_row = [
         " ",
+        "IXL Log", "", "", "", "",
+        "Time Difference",
         "Communication Manager Log", "", "", "", "",
         "Time Difference",
         "Wireshark Log", "", "", "", "",
@@ -870,17 +888,19 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
     ws.freeze_panes = "A3"
     
     # Merge headers
-    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=6)  # CM Log
+    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=6)  # IXL Log
     ws.merge_cells(start_row=1, start_column=7, end_row=1, end_column=7)  # Time Diff
-    ws.merge_cells(start_row=1, start_column=8, end_row=1, end_column=12) # Wireshark
-    ws.merge_cells(start_row=1, start_column=13, end_row=1, end_column=16) # Packetswitch
+    ws.merge_cells(start_row=1, start_column=8, end_row=1, end_column=12)  # CM Log
+    ws.merge_cells(start_row=1, start_column=13, end_row=1, end_column=13)  # Time Diff
+    ws.merge_cells(start_row=1, start_column=14, end_row=1, end_column=18) # Wireshark
+    ws.merge_cells(start_row=1, start_column=19, end_row=1, end_column=22) # Packetswitch
 
     # Center Align
-    for col in [2, 7, 8, 13]:
+    for col in [2, 7, 8, 13, 14, 19]:
         cell = ws.cell(row=1, column=col)
         cell.alignment = Alignment(horizontal='center', vertical='center')
 
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=16):
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=22):
         for cell in row:
             cell.alignment = Alignment(horizontal='center', vertical='center')
     
@@ -900,6 +920,11 @@ def analyze_logs(log_file_path, pcap_file_path, start_time_str, end_time_str, pa
     messagebox.showinfo("Success", "Output has been saved to: log_packet_analysis_output.xlsx\nThe Excel file is ready to be viewed.")
 
 # UI functions for file selection
+def browse_ixl_file():
+    filename = filedialog.askopenfilename(title="Select IXL Log File", filetypes=[("Text Files", "*.txt")])
+    ixl_file_entry.delete(0, tk.END)
+    ixl_file_entry.insert(0, filename)
+
 def browse_log_file():
     filename = filedialog.askopenfilename(title="Select Communication Manager Log File", filetypes=[("Text Files", "*.txt")])
     log_file_entry.delete(0, tk.END)
@@ -922,6 +947,7 @@ def browse_packetswitch_file():
 # First function ran after the user selects run_analysis
 def run_analysis():
     has_log = True
+    ixl_file = ixl_file_entry.get()
     log_file = log_file_entry.get()
     pcap_file = pcap_file_entry.get()
     packetswitch_file = packetswitch_file_entry.get()
@@ -941,14 +967,14 @@ def run_analysis():
     if not os.path.isfile(pcap_file):
         messagebox.showerror("Error", "Please select a valid PCAP file path.")
         return
-    # Packetswitch file is optional, so no error if missing
+    # Only wireshark log is necessary
     
-
+    if not ixl_file:
+        ixl_file = False
     if not log_file:
-        has_log = False
-        analyze_logs(has_log, pcap_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex), filename_suffix_entry.get())   
-    else: 
-        analyze_logs(log_file, pcap_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex), filename_suffix_entry.get())
+        log_file = False
+        
+    analyze_logs(ixl_file, log_file, pcap_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex), filename_suffix_entry.get())
 
 # ********** Everything above this point is functions and libraries **********
 
@@ -956,40 +982,45 @@ def run_analysis():
 root = tk.Tk()
 root.title("Log Packet Analysis Tool")
 
-tk.Label(root, text="Communication Manager Log Text File:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="IXL Text File:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
+ixl_file_entry = tk.Entry(root, width=60)
+ixl_file_entry.grid(row=0, column=1, padx=10)
+tk.Button(root, text="Browse", command=browse_ixl_file).grid(row=0, column=2, padx=10)
+
+tk.Label(root, text="Communication Manager Log Text File:").grid(row=1, column=0, sticky="w", padx=10, pady=5)
 log_file_entry = tk.Entry(root, width=60)
-log_file_entry.grid(row=0, column=1, padx=10)
-tk.Button(root, text="Browse", command=browse_log_file).grid(row=0, column=2, padx=10)
+log_file_entry.grid(row=1, column=1, padx=10)
+tk.Button(root, text="Browse", command=browse_log_file).grid(row=1, column=2, padx=10)
 
-tk.Label(root, text="Wireshark PCAP File:").grid(row=1, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="Wireshark PCAP File:").grid(row=2, column=0, sticky="w", padx=10, pady=5)
 pcap_file_entry = tk.Entry(root, width=60)
-pcap_file_entry.grid(row=1, column=1, padx=10)
-tk.Button(root, text="Browse", command=browse_pcap_file).grid(row=1, column=2, padx=10)
+pcap_file_entry.grid(row=2, column=1, padx=10)
+tk.Button(root, text="Browse", command=browse_pcap_file).grid(row=2, column=2, padx=10)
 
-tk.Label(root, text="Packetswitch Data HTML File:").grid(row=2, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="Packetswitch Data HTML File:").grid(row=3, column=0, sticky="w", padx=10, pady=5)
 packetswitch_file_entry = tk.Entry(root, width=60)
-packetswitch_file_entry.grid(row=2, column=1, padx=10)
-tk.Button(root, text="Browse", command=browse_packetswitch_file).grid(row=2, column=2, padx=10)
+packetswitch_file_entry.grid(row=3, column=1, padx=10)
+tk.Button(root, text="Browse", command=browse_packetswitch_file).grid(row=3, column=2, padx=10)
 
-tk.Label(root, text="Start Time (HH:MM:SS.sss):").grid(row=3, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="Start Time (HH:MM:SS.sss):").grid(row=4, column=0, sticky="w", padx=10, pady=5)
 start_time_entry = tk.Entry(root, width=20)
-start_time_entry.grid(row=3, column=1, sticky="w", padx=10)
+start_time_entry.grid(row=4, column=1, sticky="w", padx=10)
 
-tk.Label(root, text="End Time (HH:MM:SS.sss):").grid(row=4, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="End Time (HH:MM:SS.sss):").grid(row=5, column=0, sticky="w", padx=10, pady=5)
 end_time_entry = tk.Entry(root, width=20)
-end_time_entry.grid(row=4, column=1, sticky="w", padx=10)
+end_time_entry.grid(row=5, column=1, sticky="w", padx=10)
 
-tk.Label(root, text="Target Address:").grid(row=5, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="Target Address:").grid(row=6, column=0, sticky="w", padx=10, pady=5)
 target_address_entry = tk.Entry(root, width=20)
-target_address_entry.grid(row=5, column=1, sticky="w", padx=10)
+target_address_entry.grid(row=6, column=1, sticky="w", padx=10)
 
-tk.Label(root, text="Output suffix after 'log_packet_analysis_output':").grid(row=6, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="Output suffix after 'log_packet_analysis_output':").grid(row=7, column=0, sticky="w", padx=10, pady=5)
 filename_suffix_entry = tk.Entry(root, width=20)
-filename_suffix_entry.grid(row=6, column=1, sticky="w", padx=10)
+filename_suffix_entry.grid(row=7, column=1, sticky="w", padx=10)
 
-tk.Button(root, text="Run Analysis", command=run_analysis, bg="green", fg="white").grid(row=7, column=1, pady=20)
+tk.Button(root, text="Run Analysis", command=run_analysis, bg="green", fg="white").grid(row=8, column=1, pady=20)
 
-tk.Label(root, text="You will receive a message that the Excel file is ready to be viewed. This may take a few minutes", fg="blue").grid(row=8, column=0, columnspan=3, pady=10)
+tk.Label(root, text="You will receive a message that the Excel file is ready to be viewed. This may take a few minutes", fg="blue").grid(row=9, column=0, columnspan=3, pady=10)
 
 # Start the UI event loop
 root.mainloop()
