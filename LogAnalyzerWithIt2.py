@@ -3,14 +3,14 @@
 # Jake Chinchar
 # Purpose: Analyze Communication Manager logs, Wireshark PCAP files, and Packetswitch HTML reports to correlate message flows.
 # Output: Generates a formatted Excel report summarizing findings
-# Date last edited: 11/13/2025
+# Date last edited: 11/17/2025
 #=====================================================
 
 # Filters for WS
-# current filter: ((atcsl3.srce_addr contains 71:a3:a7:8a:36) || (atcsl3.dest_addr contains 71:a3:a7:8a:36)) && !(_ws.col.protocol == "ATCS/TCP")
-# current filter: ((atcsl3.srce_addr contains 71:a3:a7:8a:33) || (atcsl3.dest_addr contains 71:a3:a7:8a:33)) && !(_ws.col.protocol == "ATCS/TCP")
+# filter: ((atcsl3.srce_addr contains 71:a3:a7:8a:36) || (atcsl3.dest_addr contains 71:a3:a7:8a:36)) && !(_ws.col.protocol == "ATCS/TCP")
 
-# Git commands for terminal
+# Commands for terminal
+# cd "folder path"
 # git status
 # git add LogAnalyzerWithIt2.py
 # git commit -m "Describe what was changed"
@@ -208,7 +208,6 @@ def process_ws_hex_data(ws_hex_data: str, msg_type_raw: str) -> str:
 
 def extract_hex_data(lines, start_index, msg_type_raw, line_type):
     """
-    New logic:
     1. After finding '02 02 12 8B' or '02 02 12 01', remove first 2 hex pairs.
     2. Take the next (third) hex pair after message type, convert to binary.
     3. Remove first 2 bits from that binary value.
@@ -258,7 +257,228 @@ def extract_hex_data(lines, start_index, msg_type_raw, line_type):
 
     return ' '.join(collected)
 
+#################################################
+# IXL code section start
 
+IXL_LABEL_TO_WS_TYPE = {
+    'CTL': 'Control (12 01)',
+    'IND': 'Ind (12 8B)',
+}
+
+# Regex for lines containing 8-bit data for CTL / IND
+ixl_line_re = re.compile(
+    r'(?P<md>\d{2}-\d{2})\s+(?P<hms>\d{2}:\d{2}:\d{2}\.\d{2}).*?\b(?P<label>CTL|IND)\(\d{1,3}-\d{1,3}\):\s+(?P<bits>[01]{8})'
+)
+ixl_end_re = re.compile(r'Execute issued', re.IGNORECASE)
+
+# Valid minutes time window between IXL and Wireshark
+MAX_IXL_WS_DIFF_MINUTES = 16
+
+def parse_time_flexible(ts_str: str) -> datetime:
+    
+    # Parse 'HH:MM:SS.sss' or 'HH:MM:SS.xx' into a datetime with milliseconds granularity.
+    
+    if not ts_str:
+        raise ValueError("Empty time string")
+    if '.' in ts_str:
+        hms, frac = ts_str.split('.', 1)
+        if len(frac) == 2:         # hundredths -> pad to ms
+            ts_norm = f"{hms}.{frac}0"
+        elif len(frac) >= 3:       # keep first 3 digits
+            ts_norm = f"{hms}.{frac[:3]}"
+        else:                      # 1 digit -> pad
+            ts_norm = f"{hms}.{frac.ljust(3, '0')}"
+    else:
+        ts_norm = ts_str + ".000"
+    return datetime.strptime(ts_norm, "%H:%M:%S.%f")
+
+def reverse_bits_to_hex(bits_8: str) -> str:
+    rev = bits_8[::-1]
+    return f"{int(rev, 2):02X}"
+
+def bits_list_to_hex(bits_list: list[str]) -> str:
+    return ' '.join(reverse_bits_to_hex(b) for b in bits_list)
+
+def normalize_hex_no_spaces(s: str) -> str:
+    return (s or '').replace(' ', '').upper()
+
+def minutes_abs(dt_a: datetime, dt_b: datetime) -> float:
+    # Absolute difference in minutes (time-of-day only)
+    a = dt_a.time(); b = dt_b.time()
+    # compute via seconds-of-day to avoid date effects
+    to_secs = lambda t: t.hour*3600 + t.minute*60 + t.second + t.microsecond/1_000_000
+    return abs(to_secs(a) - to_secs(b)) / 60.0
+
+def _flush_ixl_group(acc_label, acc_bits, acc_time, out_msgs,
+                     start_dt: datetime | None, end_dt: datetime | None):
+    
+    # Finalize the current IXL group into a message dict and append to out_msgs
+    # if its time is within [start_dt, end_dt] (if provided)
+
+    if not acc_label or not acc_bits:
+        return
+    ws_type = IXL_LABEL_TO_WS_TYPE.get(acc_label.upper())
+    if not ws_type:
+        return
+
+    include = True
+    if start_dt or end_dt:
+        try:
+            t = parse_time_flexible(acc_time)
+            if start_dt and t.time() < start_dt.time():
+                include = False
+            if end_dt and t.time() > end_dt.time():
+                include = False
+        except Exception:
+            include = False
+
+    if not include:
+        return
+
+    data_hex = bits_list_to_hex(acc_bits)
+    out_msgs.append({
+        "time_tag": acc_time or '',
+        "msg_type": ws_type,
+        "data_hex": data_hex,
+        "_data_norm": normalize_hex_no_spaces(data_hex),
+    })
+
+def parse_ixl_file(ixl_file_path: str,
+                   start_dt: datetime | None = None,
+                   end_dt: datetime | None = None) -> list[dict]:
+
+    # Parse the IXL log into grouped Control/Ind messages (with per-row bit reversal),
+    # filtered to [start_dt, end_dt] if provided
+
+    if not ixl_file_path or not os.path.isfile(ixl_file_path):
+        return []
+
+    messages = []
+    acc_label = None
+    acc_bits: list[str] = []
+    acc_time = None
+
+    with open(ixl_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        for raw in f:
+            line = raw.rstrip('\n')
+
+            # End marker flush
+            if ixl_end_re.search(line):
+                _flush_ixl_group(acc_label, acc_bits, acc_time, messages, start_dt, end_dt)
+                acc_label, acc_bits, acc_time = None, [], None
+                continue
+
+            m = ixl_line_re.search(line)
+            if not m:
+                if acc_bits:
+                    _flush_ixl_group(acc_label, acc_bits, acc_time, messages, start_dt, end_dt)
+                    acc_label, acc_bits, acc_time = None, [], None
+                continue
+
+            label = m.group('label').upper()
+            bits = m.group('bits')
+            time_tag = m.group('hms')  # 'HH:MM:SS.xx'
+
+            if acc_label is not None and label != acc_label:
+                _flush_ixl_group(acc_label, acc_bits, acc_time, messages, start_dt, end_dt)
+                acc_label, acc_bits, acc_time = None, [], None
+
+            if acc_label is None:
+                acc_label = label
+                acc_time = time_tag
+
+            acc_bits.append(bits)
+
+    if acc_bits:
+        _flush_ixl_group(acc_label, acc_bits, acc_time, messages, start_dt, end_dt)
+
+    return messages
+
+def build_ixl_dataframe(ixl_file_path: str,
+                        ws_entries: list[list],
+                        start_time_str: str | None = None,
+                        end_time_str: str | None = None,
+                        max_diff_minutes: float = MAX_IXL_WS_DIFF_MINUTES) -> pd.DataFrame:
+
+    row_count = len(ws_entries)
+    aligned_empty = [{'time tag': '', 'msg type': '', 'data (hex)': '', 'direction': '', 'component': ''} for _ in range(row_count)]
+
+    # No IXL: return empty-aligned df
+    if not ixl_file_path or not os.path.isfile(ixl_file_path):
+        return pd.DataFrame(aligned_empty, columns=["time tag", "msg type", "data (hex)", "direction", "component"])
+
+    # Parse start/end
+    start_dt = end_dt = None
+    try:
+        if start_time_str:
+            start_dt = parse_time_flexible(start_time_str)
+        if end_time_str:
+            end_dt = parse_time_flexible(end_time_str)
+    except Exception:
+        start_dt = end_dt = None
+
+    # Parse IXL with time window
+    ixl_msgs = parse_ixl_file(ixl_file_path, start_dt=start_dt, end_dt=end_dt)
+
+    # Pool of unmatched IXL
+    unmatched_ixl = [{
+        'time_tag': m['time_tag'],
+        'msg_type': m['msg_type'],
+        'data_pretty': m['data_hex'],
+        'data_norm': m['_data_norm'],
+    } for m in ixl_msgs]
+
+    rows = [{'time tag': '', 'msg type': '', 'data (hex)': '', 'direction': '', 'component': ''} for _ in range(row_count)]
+
+    for i, ws_row in enumerate(ws_entries):
+        if not ws_row or len(ws_row) < 4:
+            continue
+
+        ws_time_str = ws_row[0] or ''
+        ws_msg_type = ws_row[1]
+        ws_payload_pretty = ws_row[3]
+
+        if not ws_msg_type or not ws_payload_pretty or not ws_time_str:
+            continue
+        if ws_msg_type not in ('Control (12 01)', 'Ind (12 8B)'):
+            continue
+
+        # Normalize WS payload for equality comparison
+        ws_payload_norm = normalize_hex_no_spaces(ws_payload_pretty)
+
+        # Parse WS time (skip row if unparsable)
+        try:
+            ws_dt = parse_time_flexible(ws_time_str)
+        except Exception:
+            continue
+
+        # Find the first IXL that matches type+payload and is within the time window
+        found_idx = None
+        for j, im in enumerate(unmatched_ixl):
+            if im['msg_type'] != ws_msg_type:
+                continue
+            if im['data_norm'] != ws_payload_norm:
+                continue
+            # Time window check
+            try:
+                ixl_dt = parse_time_flexible(im['time_tag'])
+            except Exception:
+                continue
+            if minutes_abs(ws_dt, ixl_dt) <= float(max_diff_minutes):
+                found_idx = j
+                break
+
+        if found_idx is not None:
+            im = unmatched_ixl.pop(found_idx)
+            rows[i]['time tag']   = im['time_tag']
+            rows[i]['msg type']   = im['msg_type']
+            rows[i]['data (hex)'] = im['data_pretty']
+
+    # Returns the IXL dataframe
+    return pd.DataFrame(rows, columns=["time tag", "msg type", "data (hex)", "direction", "component"])
+
+# IXL end
+###################################################
 
 def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, end_time_str, packetswitch_file_path, target_address, filename_suffix):
 
@@ -634,15 +854,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, e
 
     # Create dataframes for Excel Output
     row_count = len(cm_entries)  # keep alignment across sections
-    
-    ixl_df = pd.DataFrame({
-        "time tag":     [''] * row_count,
-        "msg type":     [''] * row_count,
-        "data (hex)":   [''] * row_count,
-        "direction":    [''] * row_count,
-        "component":    [''] * row_count,
-    })
-
+    ixl_df = build_ixl_dataframe(ixl_file_path, ws_entries, start_time_str, end_time_str)
 
     # 2) The first Time Difference (between IXL and CM) should be empty
     diff2_df = pd.DataFrame({" ": [''] * row_count})
