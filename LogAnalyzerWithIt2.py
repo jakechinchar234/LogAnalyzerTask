@@ -1,27 +1,36 @@
 #=====================================================
-# LogAnalyzerWithIt2.py
+# LogAnalyzerNew.py
 # Jake Chinchar
 # Purpose: Analyze Communication Manager logs, Wireshark PCAP files, and Packetswitch HTML reports to correlate message flows.
 # Output: Generates a formatted Excel report summarizing findings
-# Date last edited: 11/17/2025
+# Date last edited: 12/3/2025
 #=====================================================
 
-# Filters for WS
-# filter: ((atcsl3.srce_addr contains 71:a3:a7:8a:36) || (atcsl3.dest_addr contains 71:a3:a7:8a:36)) && !(_ws.col.protocol == "ATCS/TCP")
+# Wireshark Filter Example: 
+# ((atcsl3.srce_addr contains 71:a3:a7:8a:36) || (atcsl3.dest_addr contains 71:a3:a7:8a:36)) && !(_ws.col.protocol == "ATCS/TCP")
 
-# Commands for terminal
+# For Git
 # cd "folder path"
 # git status
 # git add LogAnalyzerWithIt2.py
-# git commit -m "Describe what was changed"
+# git commit -m "Describe changes"
 # git push origin main
 
-# Required external packages:
+# Required External Packages:
 # pip install scapy pandas openpyxl beautifulsoup4 python-docx
 
-# Built-in modules: tkinter, datetime, re, os
+# Built-in modules: tkinter, datetime, re, os, subprocess, json
 
-# Import necessary libraries
+# CODE IMPROVEMENTS TO IMPLEMENT IN THE FUTURE:
+# 1. Add date filtering
+# 2. Find addresses in wireshark to choose from (the user should not have to enter the address, they should select)
+# 3. Incoorporate an incorrect input file notification
+# 4. Have a progress bar
+# 5. Check to see if the ATCS address in the comms manager log matches the one entered (if a comms manager file is provided)
+# 6. Eliminate the need for a wireshark file
+# 7. Prevent errors for when user enteres an output file (/ and ? cause errors as of now)
+
+# Import Libraries
 import tkinter as tk                            # For GUI
 from tkinter import filedialog, messagebox      # filedialog for opening/saving files, messagebox for error alerts and success notifs
 from scapy.all import rdpcap, Raw               # Read packets from pcap file
@@ -31,12 +40,14 @@ import re                                       # Pattern matching & parsing
 import os                                       # Operating system functions
 import pandas as pd                             # For dataframes
 from openpyxl import load_workbook              # To write to and modify excel files
-from openpyxl.styles import Alignment           # For excel alignment
+from openpyxl.styles import Alignment, PatternFill           # For excel alignment
 from openpyxl.utils import get_column_letter    # Converts column index to Excel column letters
 from bs4 import BeautifulSoup                   # To read HTML files
 from docx import Document                       # To read .docx
-import subprocess
-import json
+import subprocess                               # Used to run external commands like 'tshark' for extracting Wireshark data    
+import json                                     # Used to parse JSON output from tshark and handle structured data
+from openpyxl.utils import get_column_letter    # Converts numeric column index to Excel letters (e.g., 1 -> 'A') for formatting
+from openpyxl.styles import Alignment, PatternFill           # Used to set cell alignment in Excel (center, left, wrap text)
 
             
 # Expression to extract time tags from log lines (e.g., 12:34:56.78)
@@ -44,7 +55,7 @@ time_pattern = re.compile(r'\b\d{2}:\d{2}:\d{2}\.\d{2}\b')
 
 # Converts a time string to a datetime object
 def parse_time_only(ts_str):
-    # Add a .0 if no decimal added
+    # Add a .0 if the user does not add a decimal to the input start or end time
     if '.' not in ts_str:
         ts_str += '.0'
 
@@ -61,11 +72,12 @@ def format_timedelta(td):
     return f"{hours:02}:{minutes:02}:{seconds:02}.{milliseconds:02}"
 
 # Checks if a packet contains the target address and is not TCP
-# In the future, TCP will be ok to look at
+# FUTURE CHANGE: TCP will be valid, will instead specify in the output file if it is TCP or not, so that the user can filter themselves
 def is_valid_packet(pkt, data_bytes, target_address):
     return target_address in data_bytes and not TCP in pkt
 
 # Searches for a matching packet in the pcap file
+# Finds the matching packet by looking for the first entry with the same message type and message number within 8 minutes of either direction of the comms manager time tag
 def find_pcap_time(search_bytes, log_dt, packets, target_address, pcap_file_path, msg_type_raw):
     for pkt in packets:
         if Raw in pkt and target_address in pkt[Raw].load:
@@ -82,7 +94,7 @@ def find_pcap_time(search_bytes, log_dt, packets, target_address, pcap_file_path
                     minutes_diff = time_diff.total_seconds() / 60
                     # Valid minutes difference allowed (wireshark time tag can be -8 minutes before or 8 minutes
                     
-                    # Additional filter
+                    # Filter to ensure that the entry is found is within a realistic time frame
                     if pcap_time_only < (log_dt - timedelta(minutes=8)):
                         continue
 
@@ -97,16 +109,18 @@ def find_pcap_time(search_bytes, log_dt, packets, target_address, pcap_file_path
                         return pcap_ts_str, format_timedelta(time_diff), True, ws_hex_data
                     else:
                         # The wireshark message found does not correspond to the communication manager message with the same msg number and type
-                        # Messages with "Found but overflow" are not going to be printed ti the excel file
+                        # Messages with "Found but overflow" are not going to be printed to the excel file
+                        # There is a finite number of message numbers, so this states that there was wrapping of the message number 
                             return pcap_ts_str, "Found but overflow", False, ''
                 except:
                     continue
 
-    # if no messages or overflow were found
+    # If no messages or overflow were found, then the message is "LOST", which means that the communication manager log has this message, but the wireshark did not
     return None, "LOST", False, ''
         
 
 # Checks if the output Excel file is currently open/locked
+# This script does not write over output files that are open. The user can close the file or wire a different name for the output file
 def is_file_open(filepath):
     try:
         os.rename(filepath, filepath)
@@ -115,75 +129,152 @@ def is_file_open(filepath):
         return True
 
 
-def extract_ws_hex_data(pcap_path: str, ws_time_tag: str, msg_type_raw: str, fallback_hex: str = '') -> str:
 
-    # Decide which field to look for
+def extract_ws_hex_data(pcap_path: str, ws_time_tag: str, msg_type_raw: str, fallback_hex: str = '') -> str:
+    """
+    Extracts a specific hex payload from a Wireshark PCAP using tshark JSON output,
+    matching exactly on a Wireshark-formatted timestamp (HH:MM:SS.mmm).
+    
+    Parameters
+    ----------
+    pcap_path : str
+        Full path to the .pcap file.
+    ws_time_tag : str
+        Target Wireshark time tag in 'HH:MM:SS.mmm' format (milliseconds).
+        Example: '12:34:56.789'
+    msg_type_raw : str
+        Raw message type from the CM/WS context. Expected values:
+        - '12 8B' -> we look for 'indication_bits' in the tshark JSON
+        - '12 01' -> we look for 'control_bits' in the tshark JSON
+    fallback_hex : str, optional
+        Hex string to return if we cannot find (or parse) the desired payload.
+        This ensures the caller still gets something usable.
+
+    Returns
+    -------
+    str
+        Space-separated uppercase hex pairs (e.g., 'DE AD BE EF').
+        Returns `fallback_hex` if no matching frame/payload is found.
+    """
+
+    # Map the raw message type to the corresponding label name that appears in
+    # tshark's JSON "showname" fields. If type isn't recognized, we bail early.
     if msg_type_raw == '12 8B':
         wanted_label = 'indication_bits'
     elif msg_type_raw == '12 01':
         wanted_label = 'control_bits'
     else:
-        return ''
+        return ''  # Unknown msg_type_raw: no defined label to search for
 
     try:
-        # Filter frames by second for speed
-        second_str = ws_time_tag.split('.')[0]  # HH:MM:SS
+        # Phase 1: Narrow the search window to the matching second
+        # We only filter by the 'HH:MM:SS' part to reduce I/O and JSON size.
+        # Later, we verify exact millisecond match.
+        second_str = ws_time_tag.split('.')[0]  # 'HH:MM:SS'
         display_filter = f'frame.time contains "{second_str}"'
+
+        # Run tshark to produce JSON for frames in that second.
+        # -r <pcap> : read file
+        # -Y <filter> : display filter (not capture filter)
+        # -T json : output as JSON
         proc = subprocess.run(
             ["tshark", "-r", pcap_path, "-Y", display_filter, "-T", "json"],
-            capture_output=True, text=True, check=True
+            capture_output=True, text=True, check=True  # check=True raises CalledProcessError on non-zero exit
         )
-        frames = json.loads(proc.stdout)
+        frames = json.loads(proc.stdout)  # List[dict] of frame objects
 
+        # Local import (already available globally), used to format epoch to HH:MM:SS.mmm
         from datetime import datetime
+
+        # Phase 2: Find the single frame that exactly matches 'ws_time_tag' 
+        # Read each frame, get epoch time → convert to HH:MM:SS.mmm, compare.
         for fr in frames:
-            layers = fr.get("_source", {}).get("layers", {})
+            layers = fr.get("_source", {}).get("layers", {})  # Safe access to nested JSON
             t_epoch_list = layers.get("frame", {}).get("frame.time_epoch", [])
             if not t_epoch_list:
-                continue
+                continue  # No epoch in this frame; skip
+
             try:
+                # Convert epoch to float → datetime → format 'HH:MM:SS.mmm'
                 t_epoch = float(t_epoch_list[0])
                 candidate = datetime.fromtimestamp(t_epoch).strftime('%H:%M:%S.%f')[:-3]
             except:
+                # If any parsing error happens, ignore this frame
                 continue
+
+            # Only proceed for the exact millisecond match (same 'HH:MM:SS.mmm')
             if candidate != ws_time_tag:
                 continue
 
-            # Search for wanted_label in showname
+            # Phase 3: Walk the JSON tree to locate the value tied to `wanted_label` 
+            # tshark JSON can be deeply nested; we recurse through dicts/lists.
+            # We look specifically for a field with 'showname' that starts with '<wanted_label>: '.
             def find_val(node):
+                # Recursive search across dicts/lists for a matching 'showname'
                 if isinstance(node, dict):
                     if 'showname' in node and isinstance(node['showname'], str):
-                        prefix = f"{wanted_label}: "
+                        prefix = f"{wanted_label}: "  # e.g., 'indication_bits: ' or 'control_bits: '
                         if node['showname'].startswith(prefix):
+                            # Extract everything after '<label>: '
                             return node['showname'][len(prefix):].strip()
+                    # Recurse into nested values
                     for v in node.values():
                         val = find_val(v)
                         if val:
                             return val
                 elif isinstance(node, list):
+                    # Recurse into each item of the list
                     for item in node:
                         val = find_val(item)
                         if val:
                             return val
-                return None
+                return None  # Not found at this branch
 
             val = find_val(layers)
             if val:
+                # Phase 4: Normalize to hex pairs 
+                # Remove any non-hex characters, then group into uppercased byte pairs.
                 raw = re.sub(r'[^0-9A-Fa-f]', '', val)
                 return ' '.join(raw[i:i+2].upper() for i in range(0, len(raw), 2))
 
     except:
+        # Any error (tshark not present, invalid JSON, CalledProcessError, etc.)
+        # Do not crash—return fallback hex instead.
         pass
 
+    # If we got here, we didn't find a precise match or parsing failed—use fallback
     return fallback_hex
+
 
 
 # Helper function to process Wireshark hex data
 # It searches for '02 02 12 8B' or '02 02 12 01', removes everything before and including that sequence, then removes the next four hex pairs.
+# The data is always in this format
+
+# === Helper functions for message type normalization ===
+def _normalize_group_from_raw(msg_type_raw: str) -> str:
+    s = (msg_type_raw or '').upper().strip()
+    if s in ('12 8B', '78 8B'):
+        return 'IND'
+    if s in ('12 01', '12 48'):
+        return 'CTL_RECALL'
+    if s in ('08 82', '08 83'):
+        return 'GROUP_0882_0883'
+    return s
+
+def _group_from_msg_type_cell(cell_val: str) -> str:
+    val = (cell_val or '').strip()
+    if '(' in val and ')' in val:
+        raw = val.split('(')[-1].strip(')')
+    else:
+        raw = val
+    return _normalize_group_from_raw(raw)
+
 def process_ws_hex_data(ws_hex_data: str, msg_type_raw: str) -> str:
     if not ws_hex_data:
         return ws_hex_data
     parts = ws_hex_data.strip().split()
+
     # Find index of sequence
     idx = None
     for i in range(len(parts) - 3):
@@ -214,6 +305,7 @@ def extract_hex_data(lines, start_index, msg_type_raw, line_type):
     4. Use remaining bits as length (in hex pairs).
     5. Trim collected hex pairs to match this length.
     """
+    
     collected = []
     found_sequence = False
     sequence_patterns = [['02', '02', '12', '8B'], ['02', '02', '12', '01']]
@@ -257,36 +349,67 @@ def extract_hex_data(lines, start_index, msg_type_raw, line_type):
 
     return ' '.join(collected)
 
-#################################################
+
+
+#=======================
 # IXL code section start
+#=======================
+
+# Future: move this section to its own file for better clarity
+
+# XL parsing & matching (RULE-BASED COMPONENTS, NEWLINES)
+# - Groups CTL/IND rows (per-row bit reversal).
+# - Applies IXL start/end time filter.
+# - Matches to Wireshark by same msg type + exact payload + |Δt| <= 12 minutes.
+# - COMPONENT RULE:
+#     For any line containing " -- ", take the substring AFTER " -- ".
+#     If it does NOT start with IND/CTL/Execute (case-insensitive), capture it as a component line
+#     and attach it to the most recently completed Control or Ind message.
+#     Place each captured component on its own line within the same Excel cell.
 
 IXL_LABEL_TO_WS_TYPE = {
     'CTL': 'Control (12 01)',
     'IND': 'Ind (12 8B)',
 }
 
-# Regex for lines containing 8-bit data for CTL / IND
-ixl_line_re = re.compile(
-    r'(?P<md>\d{2}-\d{2})\s+(?P<hms>\d{2}:\d{2}:\d{2}\.\d{2}).*?\b(?P<label>CTL|IND)\(\d{1,3}-\d{1,3}\):\s+(?P<bits>[01]{8})'
-)
-ixl_end_re = re.compile(r'Execute issued', re.IGNORECASE)
 
-# Valid minutes time window between IXL and Wireshark
-MAX_IXL_WS_DIFF_MINUTES = 16
+ixl_line_re = re.compile(
+    r'^(?:\w{3}\s+)?'                # Optional weekday (e.g., Wed)
+    r'(?P<md>\d{2}-\d{2}(?:-\d{4})?)\s+'  # MM-DD or MM-DD-YYYY
+    r'(?P<hms>\d{2}:\d{2}:\d{2}\.\d{2}).*?\b'
+    r'(?P<label>CTL|IND)\(\d{1,3}-\d{1,3}\):\s+(?P<bits>[01]{8})'
+)
+
+# ^ Regex to parse IXL log lines into structured components:
+# Example line: "11-20 14:32:07.45 ... CTL(12-34): 10101100"
+# Captures:
+#   md    -> Month-Day (e.g., "11-20")
+#   hms   -> Time in HH:MM:SS.xx format (e.g., "14:32:07.45")
+#   label -> Message type: "CTL" (Control) or "IND" (Indication)
+#   bits  -> 8-bit binary string (e.g., "10101100")
+# Pattern details:
+#   (?P<md>\d{2}-\d{2})                 : Two digits, dash, two digits (date)
+#   \s+                                 : Whitespace separator
+#   (?P<hms>\d{2}:\d{2}:\d{2}\.\d{2})   : Time with fractional seconds
+#   .*?                                 : Match for intermediate text
+#   \b(?P<label>CTL|IND)                : Word boundary, then CTL or IND
+#   \(\d{1,3}-\d{1,3}\):                : Message number range in parentheses
+
+ixl_end_execute_re = re.compile(r'Execute issued', re.IGNORECASE)
+
+MAX_IXL_WS_DIFF_MINUTES = 8
+# Max time difference allowed between IXL and Wireshark entries
 
 def parse_time_flexible(ts_str: str) -> datetime:
-    
-    # Parse 'HH:MM:SS.sss' or 'HH:MM:SS.xx' into a datetime with milliseconds granularity.
-    
     if not ts_str:
         raise ValueError("Empty time string")
     if '.' in ts_str:
         hms, frac = ts_str.split('.', 1)
-        if len(frac) == 2:         # hundredths -> pad to ms
+        if len(frac) == 2:
             ts_norm = f"{hms}.{frac}0"
-        elif len(frac) >= 3:       # keep first 3 digits
+        elif len(frac) >= 3:
             ts_norm = f"{hms}.{frac[:3]}"
-        else:                      # 1 digit -> pad
+        else:
             ts_norm = f"{hms}.{frac.ljust(3, '0')}"
     else:
         ts_norm = ts_str + ".000"
@@ -303,23 +426,57 @@ def normalize_hex_no_spaces(s: str) -> str:
     return (s or '').replace(' ', '').upper()
 
 def minutes_abs(dt_a: datetime, dt_b: datetime) -> float:
-    # Absolute difference in minutes (time-of-day only)
     a = dt_a.time(); b = dt_b.time()
-    # compute via seconds-of-day to avoid date effects
     to_secs = lambda t: t.hour*3600 + t.minute*60 + t.second + t.microsecond/1_000_000
     return abs(to_secs(a) - to_secs(b)) / 60.0
 
-def _flush_ixl_group(acc_label, acc_bits, acc_time, out_msgs,
-                     start_dt: datetime | None, end_dt: datetime | None):
-    
-    # Finalize the current IXL group into a message dict and append to out_msgs
-    # if its time is within [start_dt, end_dt] (if provided)
 
+def _extract_component_from_line(line: str) -> str | None:
+    """
+    Extract component text from either:
+      1) Legacy lines that include " -- "
+      2) Timestamped lines with optional weekday/year (e.g. "Wed 11-12-2025 04:00:03.76  GEO_BOX_1W: ...")
+
+    Lines starting with IND/CTL or "Execute issued" are ignored.
+    """
+    # Try legacy " -- " anchor first
+    anchor = line.find(' -- ')
+    if anchor != -1:
+        after = line[anchor + len(' -- '):].strip()
+    else:
+        # Fallback: strip leading timestamp (optional weekday + optional year)
+        m = re.match(
+            r'^(?:\w{3}\s+)?'                  # optional weekday, e.g., 'Wed '
+            r'\d{2}-\d{2}(?:-\d{4})?\s+'       # MM-DD or MM-DD-YYYY
+            r'\d{2}:\d{2}:\d{2}\.\d{2}\s+'     # HH:MM:SS.ff
+            r'(?P<rest>.+)$'                   # the remainder is candidate component text
+        , line)
+        if not m:
+            return None
+        after = m.group('rest').strip()
+
+    if not after:
+        return None
+
+    # Ignore non-component starters
+    head = after[:16].lower()
+    if head.startswith('ind(') or head.startswith('ctl(') or head.startswith('execute'):
+        return None
+
+    return after
+
+
+
+def _flush_ixl_group(acc_label, acc_bits, acc_time, out_msgs,
+                     start_dt: datetime | None, end_dt: datetime | None,
+                     acc_components: list[str] | None = None) -> int | None:
+    """Append flushed message and return its index, or None if filtered out."""
     if not acc_label or not acc_bits:
-        return
+        return None
+
     ws_type = IXL_LABEL_TO_WS_TYPE.get(acc_label.upper())
     if not ws_type:
-        return
+        return None
 
     include = True
     if start_dt or end_dt:
@@ -333,81 +490,346 @@ def _flush_ixl_group(acc_label, acc_bits, acc_time, out_msgs,
             include = False
 
     if not include:
-        return
+        return None
 
     data_hex = bits_list_to_hex(acc_bits)
+    comp_lines = acc_components or []  # NEW: carry pending component lines
+
     out_msgs.append({
         "time_tag": acc_time or '',
         "msg_type": ws_type,
         "data_hex": data_hex,
         "_data_norm": normalize_hex_no_spaces(data_hex),
+        "component_lines": comp_lines,  # NEW: attach here
     })
+    return len(out_msgs) - 1
+
+
 
 def parse_ixl_file(ixl_file_path: str,
                    start_dt: datetime | None = None,
                    end_dt: datetime | None = None) -> list[dict]:
+    """
+    Parse IXL into grouped CTL/IND messages (per-row bit reversal).
 
-    # Parse the IXL log into grouped Control/Ind messages (with per-row bit reversal),
-    # filtered to [start_dt, end_dt] if provided
+    Merge rule:
+      - If there is a raw data line (IND/CTL) in the next 2 lines whose
+        time tag is within ±0.1 seconds of the first raw data line's time tag
+        (and label matches), treat it as part of the same raw data block.
 
+    Component rule:
+      - While accumulating a block, if a non-data line's time tag is within
+        ±0.1 seconds of the block's start time, attach it as a component
+        to the same block (do NOT flush).
+      - After a block is flushed, subsequent component lines are still
+        attached via the existing "awaiting_components" behavior until
+        the next CTL/IND row starts.
+    """
     if not ixl_file_path or not os.path.isfile(ixl_file_path):
         return []
 
-    messages = []
-    acc_label = None
+    def _within_point_one_seconds(t1_str: str, t2_str: str) -> bool:
+        """Return True if |t1 - t2| <= 0.1 seconds."""
+        try:
+            t1 = parse_time_flexible(t1_str)
+            t2 = parse_time_flexible(t2_str)
+            return abs((t2 - t1).total_seconds()) <= 0.1
+        except Exception:
+            return False
+
+    # Use the global time_pattern to read time from any line (including components)
+    def _time_from_any_line(s: str) -> str | None:
+        m = time_pattern.search(s)
+        return m.group(0) if m else None
+
+    messages: list[dict] = []
+    acc_label: str | None = None
     acc_bits: list[str] = []
-    acc_time = None
+    acc_time: str | None = None
+    acc_components: list[str] = []  # NEW: hold component lines until flush
+    awaiting_components: bool = False
+    last_msg_idx: int | None = None
 
+    # index-based processing to allow safe lookahead
     with open(ixl_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        for raw in f:
-            line = raw.rstrip('\n')
+        lines = f.readlines()
 
-            # End marker flush
-            if ixl_end_re.search(line):
-                _flush_ixl_group(acc_label, acc_bits, acc_time, messages, start_dt, end_dt)
-                acc_label, acc_bits, acc_time = None, [], None
-                continue
+    i = 0
+    n = len(lines)
 
-            m = ixl_line_re.search(line)
-            if not m:
-                if acc_bits:
-                    _flush_ixl_group(acc_label, acc_bits, acc_time, messages, start_dt, end_dt)
-                    acc_label, acc_bits, acc_time = None, [], None
-                continue
+    while i < n:
+        line = lines[i].rstrip('\n')
+
+        # 1) CTL/IND data row?
+        m = ixl_line_re.search(line)
+        if m:
+            # stop post-flush component capture; we're inside a data block
+            awaiting_components = False
+            last_msg_idx = None
 
             label = m.group('label').upper()
-            bits = m.group('bits')
-            time_tag = m.group('hms')  # 'HH:MM:SS.xx'
-
-            if acc_label is not None and label != acc_label:
-                _flush_ixl_group(acc_label, acc_bits, acc_time, messages, start_dt, end_dt)
-                acc_label, acc_bits, acc_time = None, [], None
+            bits  = m.group('bits')
+            ttag  = m.group('hms')  # e.g., '04:16:06.00'
 
             if acc_label is None:
+                # start a new accumulation block
                 acc_label = label
-                acc_time = time_tag
+                acc_time  = ttag
+                acc_bits.append(bits)
+                acc_components = []
 
-            acc_bits.append(bits)
+                # merge up to next two IND/CTL rows within ±0.1s and same label
+                j = i
+                lookahead_count = 0
+                while lookahead_count < 2 and (j + 1) < n:
+                    nxt = lines[j + 1].rstrip('\n')
+                    nm  = ixl_line_re.search(nxt)
+                    if nm:
+                        nxt_label = nm.group('label').upper()
+                        nxt_time  = nm.group('hms')
+                        if nxt_label == label and _within_point_one_seconds(ttag, nxt_time):
+                            acc_bits.append(nm.group('bits'))
+                            j += 1
+                            lookahead_count += 1
+                            continue
+                    # if next line is a component with same time window, capture it but don't advance lookahead
+                    comp = _extract_component_from_line(nxt)
+                    if comp:
+                        comp_time = _time_from_any_line(nxt)
+                        if comp_time and _within_point_one_seconds(ttag, comp_time):
+                            acc_components.append(comp)
+                            j += 1
+                            # do NOT increment lookahead_count; only IND/CTL rows count
+                            continue
+                    break
 
+                i = j + 1
+                continue
+
+            else:
+                # already accumulating; decide merge vs flush
+                if label == acc_label and _within_point_one_seconds(acc_time, ttag):
+                    # continuation of same block
+                    j = i
+                    acc_bits.append(bits)
+
+                    lookahead_count = 0
+                    while lookahead_count < 2 and (j + 1) < n:
+                        nxt = lines[j + 1].rstrip('\n')
+                        nm  = ixl_line_re.search(nxt)
+                        if nm:
+                            nxt_label = nm.group('label').upper()
+                            nxt_time  = nm.group('hms')
+                            if nxt_label == acc_label and _within_point_one_seconds(acc_time, nxt_time):
+                                acc_bits.append(nm.group('bits'))
+                                j += 1
+                                lookahead_count += 1
+                                continue
+                        # same-time component while block is open -> collect, don't flush
+                        comp = _extract_component_from_line(nxt)
+                        if comp:
+                            comp_time = _time_from_any_line(nxt)
+                            if comp_time and _within_point_one_seconds(acc_time, comp_time):
+                                acc_components.append(comp)
+                                j += 1
+                                # components do not consume lookahead quota
+                                continue
+                        break
+
+                    i = j + 1
+                    continue
+                else:
+                    # different label or outside 0.1s -> flush previous block
+                    idx = _flush_ixl_group(acc_label, acc_bits, acc_time,
+                                           messages, start_dt, end_dt,
+                                           acc_components)  # NEW
+                    if idx is not None and (
+                        messages[idx]['msg_type'] == 'Control (12 01)' or
+                        messages[idx]['msg_type'] == 'Ind (12 8B)'
+                    ):
+                        awaiting_components = True
+                        last_msg_idx = idx
+                    else:
+                        awaiting_components = False
+                        last_msg_idx = None
+
+                    # start a new block for current row
+                    acc_label, acc_bits, acc_time = label, [], ttag
+                    acc_components = []
+                    j = i
+                    acc_bits.append(bits)
+
+                    lookahead_count = 0
+                    while lookahead_count < 2 and (j + 1) < n:
+                        nxt = lines[j + 1].rstrip('\n')
+                        nm  = ixl_line_re.search(nxt)
+                        if nm:
+                            nxt_label = nm.group('label').upper()
+                            nxt_time  = nm.group('hms')
+                            if nxt_label == acc_label and _within_point_one_seconds(acc_time, nxt_time):
+                                acc_bits.append(nm.group('bits'))
+                                j += 1
+                                lookahead_count += 1
+                                continue
+                        comp = _extract_component_from_line(nxt)
+                        if comp:
+                            comp_time = _time_from_any_line(nxt)
+                            if comp_time and _within_point_one_seconds(acc_time, comp_time):
+                                acc_components.append(comp)
+                                j += 1
+                                continue
+                        break
+
+                    i = j + 1
+                    continue
+
+        # 2) "Execute issued"? Flush block but don't treat as a component line
+        if ixl_end_execute_re.search(line):
+            idx = _flush_ixl_group(acc_label, acc_bits, acc_time,
+                                   messages, start_dt, end_dt,
+                                   acc_components)  # NEW
+            if idx is not None and (
+                messages[idx]['msg_type'] == 'Control (12 01)' or
+                messages[idx]['msg_type'] == 'Ind (12 8B)'
+            ):
+                awaiting_components = True
+                last_msg_idx = idx
+            else:
+                awaiting_components = False
+                last_msg_idx = None
+            acc_label, acc_bits, acc_time = None, [], None
+            acc_components = []
+            i += 1
+            continue
+
+        # 3) Non-data line while accumulating:
+        #    If its time is within ±0.1s of acc_time -> attach to current block (do NOT flush).
+        #    Else -> flush and treat via post-flush component rule.
+        if acc_bits:
+            comp = _extract_component_from_line(line)
+            if comp:
+                comp_time = _time_from_any_line(line)
+                if comp_time and acc_time and _within_point_one_seconds(acc_time, comp_time):
+                    # same-time component -> keep block open, collect
+                    acc_components.append(comp)
+                    i += 1
+                    continue
+
+            # not a same-time component -> flush block first
+            idx = _flush_ixl_group(acc_label, acc_bits, acc_time,
+                                   messages, start_dt, end_dt,
+                                   acc_components)  # NEW
+            if idx is not None and (
+                messages[idx]['msg_type'] == 'Control (12 01)' or
+                messages[idx]['msg_type'] == 'Ind (12 8B)'
+            ):
+                awaiting_components = True
+                last_msg_idx = idx
+            else:
+                awaiting_components = False
+                last_msg_idx = None
+            acc_label, acc_bits, acc_time = None, [], None
+            acc_components = []
+
+            # fall through to post-flush component rule
+
+        # 4) Post-flush component capture
+        if awaiting_components and last_msg_idx is not None:
+            comp = _extract_component_from_line(line)
+            if comp:
+                messages[last_msg_idx]['component_lines'].append(comp)
+            i += 1
+            continue
+
+        # default advance
+        i += 1
+
+    # 5) Trailing group at EOF
     if acc_bits:
-        _flush_ixl_group(acc_label, acc_bits, acc_time, messages, start_dt, end_dt)
+        _flush_ixl_group(acc_label, acc_bits, acc_time,
+                         messages, start_dt, end_dt,
+                         acc_components)  # NEW
+
+    # 6) Finalize: join component lines into a single string with newlines
+    for msg in messages:
+        lines_join = msg.get('component_lines', [])
+        msg['component'] = '\r\n'.join(lines_join) if lines_join else ''
+        msg.pop('component_lines', None)
 
     return messages
+
+
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Alignment, PatternFill
+
+def adjust_ixl_component_column(ws, header_row_idx: int = 2, start_row: int = 2,
+                                ixl_component_col_index: int = 6,
+                                min_width: int = 28, max_width: int = 60):
+    """
+    Enable wrap text and set a readable width for the IXL 'component' column.
+    - Places each component on its own line has already been done in the data.
+    - Here we wrap text and size the column based on the longest line (bounded).
+    Parameters:
+        ws: openpyxl worksheet
+        header_row_idx: row where column headers are (the second row in your sheet)
+        start_row: first data row (2 if header row 1 is merged header and row 2 is per-column headers)
+        ixl_component_col_index: overall Excel column index for 'component' (default 6 = column F)
+        min_width / max_width: bounds for final column width
+    """
+    col_letter = get_column_letter(ixl_component_col_index)
+
+    # Turn on wrap + top-left alignment for all cells in that column
+    for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row,
+                            min_col=ixl_component_col_index, max_col=ixl_component_col_index):
+        for cell in row:
+            cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+
+    # Estimate a good width from the longest single line across all cells in this column
+    longest_line_len = 0
+    for row in ws.iter_rows(min_row=start_row, max_row=ws.max_row,
+                            min_col=ixl_component_col_index, max_col=ixl_component_col_index):
+        for cell in row:
+            val = str(cell.value) if cell.value is not None else ''
+            # components are newline-separated; size by the longest line
+            for ln in val.splitlines():
+                if len(ln) > longest_line_len:
+                    longest_line_len = len(ln)
+
+    # Rough heuristic: 1 char ~ 1 unit; clamp between min_width and max_width
+    target_width = max(min_width, min(max_width, longest_line_len + 2))
+    ws.column_dimensions[col_letter].width = target_width
+
+
+    # --- NEW: scale the row height to number of lines so all lines are visible ---
+    # Heuristic: ~14 pts per text line + a little padding
+    per_line_height = 14
+    padding = 4
+    
+    fixed_height = 15  # Adjust as needed
+    for r in range(start_row, ws.max_row + 1):
+        ws.row_dimensions[r].height = fixed_height
+
+
+
 
 def build_ixl_dataframe(ixl_file_path: str,
                         ws_entries: list[list],
                         start_time_str: str | None = None,
                         end_time_str: str | None = None,
                         max_diff_minutes: float = MAX_IXL_WS_DIFF_MINUTES) -> pd.DataFrame:
-
+    """
+    Build an IXL DataFrame row-aligned to ws_entries.
+      * IXL time filter applied
+      * exact payload + same type
+      * |IXL - WS| <= max_diff_minutes
+      * 'component' contains multi-line text (newline-separated) for Excel
+    """
     row_count = len(ws_entries)
     aligned_empty = [{'time tag': '', 'msg type': '', 'data (hex)': '', 'direction': '', 'component': ''} for _ in range(row_count)]
 
-    # No IXL: return empty-aligned df
     if not ixl_file_path or not os.path.isfile(ixl_file_path):
         return pd.DataFrame(aligned_empty, columns=["time tag", "msg type", "data (hex)", "direction", "component"])
 
-    # Parse start/end
     start_dt = end_dt = None
     try:
         if start_time_str:
@@ -417,15 +839,14 @@ def build_ixl_dataframe(ixl_file_path: str,
     except Exception:
         start_dt = end_dt = None
 
-    # Parse IXL with time window
     ixl_msgs = parse_ixl_file(ixl_file_path, start_dt=start_dt, end_dt=end_dt)
 
-    # Pool of unmatched IXL
     unmatched_ixl = [{
         'time_tag': m['time_tag'],
         'msg_type': m['msg_type'],
+        'component': m.get('component', ''),              # already newline-joined
         'data_pretty': m['data_hex'],
-        'data_norm': m['_data_norm'],
+        'data_norm': normalize_hex_no_spaces(m['data_hex']),
     } for m in ixl_msgs]
 
     rows = [{'time tag': '', 'msg type': '', 'data (hex)': '', 'direction': '', 'component': ''} for _ in range(row_count)]
@@ -443,23 +864,19 @@ def build_ixl_dataframe(ixl_file_path: str,
         if ws_msg_type not in ('Control (12 01)', 'Ind (12 8B)'):
             continue
 
-        # Normalize WS payload for equality comparison
         ws_payload_norm = normalize_hex_no_spaces(ws_payload_pretty)
 
-        # Parse WS time (skip row if unparsable)
         try:
             ws_dt = parse_time_flexible(ws_time_str)
         except Exception:
             continue
 
-        # Find the first IXL that matches type+payload and is within the time window
         found_idx = None
         for j, im in enumerate(unmatched_ixl):
             if im['msg_type'] != ws_msg_type:
                 continue
             if im['data_norm'] != ws_payload_norm:
                 continue
-            # Time window check
             try:
                 ixl_dt = parse_time_flexible(im['time_tag'])
             except Exception:
@@ -474,13 +891,19 @@ def build_ixl_dataframe(ixl_file_path: str,
             rows[i]['msg type']   = im['msg_type']
             rows[i]['data (hex)'] = im['data_pretty']
 
-    # Returns the IXL dataframe
+           # Creates a line with text "See more ..."
+            component_text = im.get('component', '')
+            if component_text:
+                component_text = "See more ...\r\n" + component_text
+            rows[i]['component'] = component_text
+
     return pd.DataFrame(rows, columns=["time tag", "msg type", "data (hex)", "direction", "component"])
+# =================== END IXL parsing & matching (RULE-BASED COMPONENTS, NEWLINES) =====================
 
 # IXL end
 ###################################################
 
-def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, end_time_str, packetswitch_file_path, target_address, filename_suffix):
+def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_path, start_time_str, end_time_str, packetswitch_file_path, target_address, filename_suffix):
 
     # This is the filter applied
     target_address = target_address  # Target address to match in packets
@@ -598,7 +1021,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, e
 
                 # Skip if hex sequence was seen in last 5 seconds
                 if hex_sequence in recent_sequence_times:
-                    if (log_dt - recent_sequence_times[hex_sequence]) <= timedelta(seconds=5):
+                    if (log_dt - recent_sequence_times[hex_sequence]) <= timedelta(seconds=30):
                         i += 1
                         continue
                 # Convert hex sequence to bytes
@@ -616,7 +1039,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, e
                     # Store results
                     hex_data = extract_hex_data(lines, i, msg_type_raw, line_type)
                     cm_entries.append([last_timestamp, msg_type, msg_number, hex_data, ''])
-                    ws_entries.append([pcap_ts_str or '', msg_type, msg_number, ws_hex_data, ''])
+                    ws_entries.append([pcap_ts_str or '', '' if pcap_ts_str is None else msg_type, '' if pcap_ts_str is None else msg_number, ws_hex_data, ''])
                     time_differences.append([time_diff_str])
 
                 # Update tracking
@@ -696,7 +1119,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, e
                             fourth_pair = hex_parts[j + 4]
                             if fourth_pair in ['34', '38']:
                                 rf_ack_time = datetime.fromtimestamp(float(pkt.time))
-                                if last_rf_ack_time and (rf_ack_time - last_rf_ack_time) <= timedelta(seconds=5):
+                                if last_rf_ack_time and (rf_ack_time - last_rf_ack_time) <= timedelta(seconds=30):
                                     continue
                                 msg_type = 'RF_ACK'
                                 # Clarify between inbound and outbound
@@ -723,11 +1146,12 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, e
                             if i > 0 and hex_parts[i+2] == '02':
                                 msg_number = '02'
                                 msg_type_raw = f"{hex_parts[i+3]} {hex_parts[i+4]}"
+                                
                             else:
                                 msg_number = hex_parts[i-1] if i > 0 else None
                                 msg_type_raw = f"{hex_parts[i+2]} {hex_parts[i+3]}"
 
-                                msg_type = msg_type_raw
+                            msg_type = msg_type_raw
                             
                             if msg_type_raw == '04 D0':
                                 continue
@@ -754,7 +1178,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, e
 
                             # Skip if hex sequence was seen in last 5 seconds
                             if hex_sequence in recent_sequence_times:
-                                if (datetime.fromtimestamp(float(pkt.time)) - recent_sequence_times[hex_sequence]) <= timedelta(seconds=5):
+                                if (datetime.fromtimestamp(float(pkt.time)) - recent_sequence_times[hex_sequence]) <= timedelta(seconds=30):
                                     continue
 
                             # Update tracking
@@ -1013,6 +1437,8 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, e
 
                         # Ensure time difference is within ±1 second
                         if time_diff is not None and time_diff <= 1:
+                            if ws_entry[1] == "RF_ACK (Outbound)" or ws_entry[1] == "RF_ACK (Inbound)":
+                                continue
                             if description == 'Indic(RF)':
                                 if ws_entry[1] != 'Ind (12 8B)':   
                                     continue
@@ -1115,7 +1541,14 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, e
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=22):
         for cell in row:
             cell.alignment = Alignment(horizontal='center', vertical='center')
+
     
+    # --- Enable wrap text for IXL component column (overall column F = 6) ---
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=6, max_col=6):
+        for cell in row:
+            # Align top-left so multiple lines read naturally; enable wrap
+            cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
+
     # Auto-adjust column widths
     for col in ws.iter_cols(min_row=2):
         max_length = 0
@@ -1125,6 +1558,40 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, start_time_str, e
             if cell.value:
                 max_length = max(max_length, len(str(cell.value)))
         ws.column_dimensions[column_letter].width = max_length + 2
+
+    
+    # After global auto-fit, override the IXL 'component' column (overall column F = 6):
+    adjust_ixl_component_column(ws, header_row_idx=2, start_row=2, ixl_component_col_index=6,
+                                min_width=28, max_width=60)
+
+        
+    # === Highlight message number jumps (Wireshark only) ===
+    yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+    COL_WS_TYPE = 15
+    COL_WS_NUM  = 16
+    last_by_group = {}
+    for r in range(2, ws.max_row + 1):
+        ws_type_val = ws.cell(row=r, column=COL_WS_TYPE).value
+        ws_num_val  = ws.cell(row=r, column=COL_WS_NUM).value
+        if not ws_type_val or not ws_num_val:
+            continue  # Skip empty WS rows
+        raw_type = ws_type_val.split('(')[-1].strip(')') if '(' in ws_type_val else ws_type_val
+        if raw_type.upper() == '08 42':
+            continue  # Skip highlighting for 08 42
+        group = _group_from_msg_type_cell(ws_type_val)
+        try:
+            current = int(str(ws_num_val).strip(), 16)
+        except Exception:
+            continue
+        last = last_by_group.get(group)
+        if last is None:
+            last_by_group[group] = current
+            continue
+        expected = (last + 2) % 256
+        if current != expected:
+            ws.cell(row=r, column=COL_WS_NUM).fill = yellow_fill
+        last_by_group[group] = current
+    # === End highlight logic ===
 
     wb.save(output_file_path)
 
@@ -1155,6 +1622,10 @@ def browse_packetswitch_file():
     packetswitch_file_entry.delete(0, tk.END)
     packetswitch_file_entry.insert(0, filename)
 
+def browse_ixl_excel_file():
+    filename = filedialog.askopenfilename(title="Select IXL Excel File", filetypes=[("Excel Files", "*.xlsx")])
+    ixl_excel_file_entry.delete(0, tk.END)
+    ixl_excel_file_entry.insert(0, filename)
 
 # First function ran after the user selects run_analysis
 def run_analysis():
@@ -1163,6 +1634,7 @@ def run_analysis():
     log_file = log_file_entry.get()
     pcap_file = pcap_file_entry.get()
     packetswitch_file = packetswitch_file_entry.get()
+    ixl_excel_file = ixl_excel_file_entry.get()
     start_time = start_time_entry.get()
     end_time = end_time_entry.get()
     target_address_hex = target_address_entry.get().replace('0', 'a').replace('.', '')
@@ -1185,8 +1657,10 @@ def run_analysis():
         ixl_file = False
     if not log_file:
         log_file = False
+    if not ixl_excel_file:
+        ixl_excel_file = False
         
-    analyze_logs(ixl_file, log_file, pcap_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex), filename_suffix_entry.get())
+    analyze_logs(ixl_file, log_file, pcap_file, ixl_excel_file, start_time, end_time, packetswitch_file, bytes.fromhex(target_address_hex), filename_suffix_entry.get())
 
 # ********** Everything above this point is functions and libraries **********
 
@@ -1209,30 +1683,35 @@ pcap_file_entry = tk.Entry(root, width=60)
 pcap_file_entry.grid(row=2, column=1, padx=10)
 tk.Button(root, text="Browse", command=browse_pcap_file).grid(row=2, column=2, padx=10)
 
-tk.Label(root, text="Packetswitch Data HTML File:").grid(row=3, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="Packetswitch Data File:").grid(row=3, column=0, sticky="w", padx=10, pady=5)
 packetswitch_file_entry = tk.Entry(root, width=60)
 packetswitch_file_entry.grid(row=3, column=1, padx=10)
 tk.Button(root, text="Browse", command=browse_packetswitch_file).grid(row=3, column=2, padx=10)
 
-tk.Label(root, text="Start Time (HH:MM:SS.sss):").grid(row=4, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="IXL Excel File:").grid(row=4, column=0, sticky="w", padx=10, pady=5)
+ixl_excel_file_entry = tk.Entry(root, width=60)
+ixl_excel_file_entry.grid(row=4, column=1, padx=10)
+tk.Button(root, text="Browse", command=browse_ixl_excel_file).grid(row=4, column=2, padx=10)
+
+tk.Label(root, text="Start Time (HH:MM:SS.sss):").grid(row=5, column=0, sticky="w", padx=10, pady=5)
 start_time_entry = tk.Entry(root, width=20)
-start_time_entry.grid(row=4, column=1, sticky="w", padx=10)
+start_time_entry.grid(row=5, column=1, sticky="w", padx=10)
 
-tk.Label(root, text="End Time (HH:MM:SS.sss):").grid(row=5, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="End Time (HH:MM:SS.sss):").grid(row=6, column=0, sticky="w", padx=10, pady=5)
 end_time_entry = tk.Entry(root, width=20)
-end_time_entry.grid(row=5, column=1, sticky="w", padx=10)
+end_time_entry.grid(row=6, column=1, sticky="w", padx=10)
 
-tk.Label(root, text="Target Address:").grid(row=6, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="Target Address:").grid(row=7, column=0, sticky="w", padx=10, pady=5)
 target_address_entry = tk.Entry(root, width=20)
-target_address_entry.grid(row=6, column=1, sticky="w", padx=10)
+target_address_entry.grid(row=7, column=1, sticky="w", padx=10)
 
-tk.Label(root, text="Output suffix after 'log_packet_analysis_output':").grid(row=7, column=0, sticky="w", padx=10, pady=5)
+tk.Label(root, text="Output suffix after 'log_packet_analysis_output':").grid(row=8, column=0, sticky="w", padx=10, pady=5)
 filename_suffix_entry = tk.Entry(root, width=20)
-filename_suffix_entry.grid(row=7, column=1, sticky="w", padx=10)
+filename_suffix_entry.grid(row=8, column=1, sticky="w", padx=10)
 
-tk.Button(root, text="Run Analysis", command=run_analysis, bg="green", fg="white").grid(row=8, column=1, pady=20)
+tk.Button(root, text="Run Analysis", command=run_analysis, bg="green", fg="white").grid(row=9, column=1, pady=20)
 
-tk.Label(root, text="You will receive a message that the Excel file is ready to be viewed. This may take a few minutes", fg="blue").grid(row=9, column=0, columnspan=3, pady=10)
+tk.Label(root, text="You will receive a message that the Excel file is ready to be viewed. This may take a few minutes", fg="blue").grid(row=10, column=0, columnspan=3, pady=10)
 
 # Start the UI event loop
 root.mainloop()
