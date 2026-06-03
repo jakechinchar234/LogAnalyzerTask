@@ -4,6 +4,11 @@ Backend logic for the Log Packet Analysis Tool.
 This file maintains the original analysis logic and helpers, without the Tkinter UI.
 """
 
+"""
+if not pcap_file_path:
+    print("No Wireshark file selected — running in CM-only mode")
+"""
+
 # ========================
 # Imports
 # ========================
@@ -829,7 +834,11 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
 
         with open(log_file_path, "r") as log_file:
             lines = log_file.readlines()
-        packets = rdpcap(pcap_file_path)
+        
+        packets = None
+        if pcap_file_path:
+            packets = rdpcap(pcap_file_path)
+
 
         html_text = ""
         if packetswitch_file_path and packetswitch_file_path.lower().endswith(".html"):
@@ -905,14 +914,31 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                     i += 1
                     continue
 
-                pcap_ts_str, time_diff_str, _, ws_hex_data = find_pcap_time(
-                    search_bytes, log_dt, packets, target_address, pcap_file_path, msg_type_raw)
+                if packets:
+                    pcap_ts_str, time_diff_str, _, ws_hex_data = find_pcap_time(
+                        search_bytes, log_dt, packets, target_address, pcap_file_path, msg_type_raw)
+                else:
+                    pcap_ts_str = None
+                    time_diff_str = ""
+                    ws_hex_data = ""
+
 
                 if time_diff_str != "Found but overflow":
                     hex_data = extract_hex_data(lines, i, msg_type_raw, line_type)
                     cm_entries.append([last_timestamp, msg_type, msg_number, hex_data, ""])
-                    ws_entries.append([pcap_ts_str or "", "" if pcap_ts_str is None else msg_type,
-                                       "" if pcap_ts_str is None else msg_number, ws_hex_data, ""])
+                    
+                    if packets:
+                        ws_entries.append([
+                            pcap_ts_str or "",
+                            "" if pcap_ts_str is None else msg_type,
+                            "" if pcap_ts_str is None else msg_number,
+                            ws_hex_data,
+                            ""
+                        ])
+                    else:
+                        # No Wireshark → leave columns empty
+                        ws_entries.append(["", "", "", "", ""])
+
                     time_differences.append([time_diff_str])
 
                     last_two_sequences.append(hex_sequence)
@@ -933,8 +959,10 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
     additional_cm_entries = []
     additional_time_differences = []
 
-    if log_file_path == False:
+    
+    if log_file_path == False and pcap_file_path:
         packets = rdpcap(pcap_file_path)
+
         try:
             start_dt = parse_time_only(start_time_str)
             end_dt = parse_time_only(end_time_str)
@@ -968,71 +996,72 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                 with open(packetswitch_file_path, "r", encoding="utf-8", errors="ignore") as f:
                     html_text = f.read()
 
-    for pkt in rdpcap(pcap_file_path):
-        if Raw in pkt:
-            data_bytes = pkt[Raw].load
-            if is_valid_packet(pkt, data_bytes, target_address):
-                hex_str = data_bytes.hex().upper()
-                hex_parts = [hex_str[i:i+2] for i in range(0, len(hex_str), 2)]
-                for i in range(len(hex_parts) - 3):
-                    for j in range(len(hex_parts) - 4):
-                        if hex_parts[j] == "8C":
-                            fourth_pair = hex_parts[j + 4]
-                            if fourth_pair in ["34", "38"]:
-                                rf_ack_time = datetime.fromtimestamp(float(pkt.time))
-                                if last_rf_ack_time and (rf_ack_time - last_rf_ack_time) <= timedelta(seconds=5):
+    if pcap_file_path:
+        for pkt in rdpcap(pcap_file_path):
+            if Raw in pkt:
+                data_bytes = pkt[Raw].load
+                if is_valid_packet(pkt, data_bytes, target_address):
+                    hex_str = data_bytes.hex().upper()
+                    hex_parts = [hex_str[i:i+2] for i in range(0, len(hex_str), 2)]
+                    for i in range(len(hex_parts) - 3):
+                        for j in range(len(hex_parts) - 4):
+                            if hex_parts[j] == "8C":
+                                fourth_pair = hex_parts[j + 4]
+                                if fourth_pair in ["34", "38"]:
+                                    rf_ack_time = datetime.fromtimestamp(float(pkt.time))
+                                    if last_rf_ack_time and (rf_ack_time - last_rf_ack_time) <= timedelta(seconds=5):
+                                        continue
+                                    msg_type = "RF_ACK (Inbound)" if fourth_pair == "34" else "RF_ACK (Outbound)"
+                                    last_rf_ack_time = rf_ack_time
+                                    pcap_time = rf_ack_time.strftime("%H:%M:%S.%f")[:-3]
+                                    additional_cm_entries.append(["Not found", "", "", "", ""])
+                                    additional_ws_entries.append([pcap_time, msg_type, "", "", ""])
+                                    additional_time_differences.append([""])
+                                    break
+                        if hex_parts[i] == "02" and hex_parts[i + 1] == "02":
+                            suffix = target_address.hex()[-2:]
+                            search_window = hex_parts[max(0, i - 11) : i]
+                            # if suffix not in search_window:
+                                # continue
+                            if i > 0 and hex_parts[i + 2] == "02":
+                                msg_number = "02"
+                                msg_type_raw = f"{hex_parts[i + 3]} {hex_parts[i + 4]}"
+                            else:
+                                msg_number = hex_parts[i - 1] if i > 0 else None
+                                msg_type_raw = f"{hex_parts[i + 2]} {hex_parts[i + 3]}"
+                            msg_type = msg_type_raw
+                            if msg_type_raw == "04 D0":
+                                continue
+                            if msg_type_raw == "12 8B":
+                                msg_type = "Ind (12 8B)"
+                            elif msg_type_raw == "12 01":
+                                msg_type = "Control (12 01)"
+                            elif msg_type_raw == "12 48":
+                                msg_type = "Recall (12 48)"
+                            hex_sequence = f"{msg_number} 02 02 {msg_type_raw}" if msg_number and msg_type_raw else None
+
+                            if log_file_path != False:
+                                if hex_sequence in [
+                                    f"{entry[2]} 02 02 {entry[1].split('(')[-1].strip(')')}" for entry in cm_entries if entry[0] != "Not found"
+                                ]:
                                     continue
-                                msg_type = "RF_ACK (Inbound)" if fourth_pair == "34" else "RF_ACK (Outbound)"
-                                last_rf_ack_time = rf_ack_time
-                                pcap_time = rf_ack_time.strftime("%H:%M:%S.%f")[:-3]
+                            pcap_time = datetime.fromtimestamp(float(pkt.time)).strftime("%H:%M:%S.%f")[:-3]
+
+                            if not hex_sequence or hex_sequence in last_two_sequences:
+                                continue
+                            if hex_sequence in recent_sequence_times:
+                                if (datetime.fromtimestamp(float(pkt.time)) - recent_sequence_times[hex_sequence]) <= timedelta(seconds=30):
+                                    continue
+                            last_two_sequences.append(hex_sequence)
+                            if len(last_two_sequences) > 2:
+                                last_two_sequences.pop(0)
+                            recent_sequence_times[hex_sequence] = datetime.fromtimestamp(float(pkt.time))
+                            if pcap_time not in found_cm_times:
                                 additional_cm_entries.append(["Not found", "", "", "", ""])
-                                additional_ws_entries.append([pcap_time, msg_type, "", "", ""])
-                                additional_time_differences.append([""])
-                                break
-                    if hex_parts[i] == "02" and hex_parts[i + 1] == "02":
-                        suffix = target_address.hex()[-2:]
-                        search_window = hex_parts[max(0, i - 11) : i]
-                        if suffix not in search_window:
-                            continue
-                        if i > 0 and hex_parts[i + 2] == "02":
-                            msg_number = "02"
-                            msg_type_raw = f"{hex_parts[i + 3]} {hex_parts[i + 4]}"
-                        else:
-                            msg_number = hex_parts[i - 1] if i > 0 else None
-                            msg_type_raw = f"{hex_parts[i + 2]} {hex_parts[i + 3]}"
-                        msg_type = msg_type_raw
-                        if msg_type_raw == "04 D0":
-                            continue
-                        if msg_type_raw == "12 8B":
-                            msg_type = "Ind (12 8B)"
-                        elif msg_type_raw == "12 01":
-                            msg_type = "Control (12 01)"
-                        elif msg_type_raw == "12 48":
-                            msg_type = "Recall (12 48)"
-                        hex_sequence = f"{msg_number} 02 02 {msg_type_raw}" if msg_number and msg_type_raw else None
-
-                        if log_file_path != False:
-                            if hex_sequence in [
-                                f"{entry[2]} 02 02 {entry[1].split('(')[-1].strip(')')}" for entry in cm_entries if entry[0] != "Not found"
-                            ]:
-                                continue
-                        pcap_time = datetime.fromtimestamp(float(pkt.time)).strftime("%H:%M:%S.%f")[:-3]
-
-                        if not hex_sequence or hex_sequence in last_two_sequences:
-                            continue
-                        if hex_sequence in recent_sequence_times:
-                            if (datetime.fromtimestamp(float(pkt.time)) - recent_sequence_times[hex_sequence]) <= timedelta(seconds=30):
-                                continue
-                        last_two_sequences.append(hex_sequence)
-                        if len(last_two_sequences) > 2:
-                            last_two_sequences.pop(0)
-                        recent_sequence_times[hex_sequence] = datetime.fromtimestamp(float(pkt.time))
-                        if pcap_time not in found_cm_times:
-                            additional_cm_entries.append(["Not found", "", "", "", ""])
-                        fallback_hex = " ".join([data_bytes.hex()[k:k+2] for k in range(0, len(data_bytes.hex()), 2)])
-                        ws_hex_data = extract_ws_hex_data(pcap_file_path, pcap_time, msg_type_raw, fallback_hex)
-                        additional_ws_entries.append([pcap_time, msg_type, msg_number, ws_hex_data, ""])
-                        additional_time_differences.append([""])
+                            fallback_hex = " ".join([data_bytes.hex()[k:k+2] for k in range(0, len(data_bytes.hex()), 2)])
+                            ws_hex_data = extract_ws_hex_data(pcap_file_path, pcap_time, msg_type_raw, fallback_hex)
+                            additional_ws_entries.append([pcap_time, msg_type, msg_number, ws_hex_data, ""])
+                            additional_time_differences.append([""])
 
     cm_entries.extend(additional_cm_entries)
     ws_entries.extend(additional_ws_entries)
@@ -1135,6 +1164,9 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                 code = ""
                 if pcap_time:
                     time_tag = pcap_time.split(".")[0]
+                    
+                    time_minus_one = (datetime.strptime(time_tag, "%H:%M:%S") - timedelta(seconds=1)).strftime("%H:%M:%S")
+
                     key = (time_tag, msg_type)
                     count = packetswitch_count.get(key, 0)
                     idx = -1
@@ -1143,6 +1175,31 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                         if idx == -1:
                             break
                     if idx != -1:
+                                                
+                        valid_match = False
+
+                        while idx != -1:
+                            after = html_text[idx:]
+                            underscore_idx = after.find("_")
+
+                            if underscore_idx != -1 and len(after) > underscore_idx + 2:
+                                raw_code = after[underscore_idx + 1 : underscore_idx + 3]
+
+                                # Check if match is correct type
+                                if (raw_code == "CR" and msg_type == "Control (12 01)") or \
+                                   (raw_code == "IR" and msg_type == "Ind (12 8B)") or \
+                                   (raw_code == "R_" and msg_type == "Recall (12 48)"):
+
+                                    valid_match = True
+                                    break  # correct one found
+
+                            # wrong match → look for NEXT occurrence
+                            idx = html_text.find(time_tag, idx + 1)
+
+                        #  If no valid match found, invalidate idx
+                        if not valid_match:
+                            idx = -1
+                            
                         after = html_text[idx:]
                         underscore_idx = after.find("_")
                         if underscore_idx != -1 and len(after) > underscore_idx + 2:
@@ -1158,6 +1215,38 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                                 packetswitch_codes.append(code)
                                 packetswitch_count[key] = count + 1
                                 continue
+                
+                # NEW: fallback search for -1 second mismatch
+                if not code:
+                    key = (time_minus_one, msg_type)
+                    count = packetswitch_count.get(key, 0)
+                    idx = -1
+
+                    for _ in range(count + 1):
+                        idx = html_text.find(time_minus_one, idx + 1)
+                        if idx == -1:
+                            break
+
+                    if idx != -1:
+                        after = html_text[idx:]
+                        underscore_idx = after.find("_")
+
+                        if underscore_idx != -1 and len(after) > underscore_idx + 2:
+                            raw_code = after[underscore_idx + 1 : underscore_idx + 3]
+
+                            if raw_code == "CR" and msg_type == "Control (12 01)":
+                                code = "Control"
+                            elif raw_code == "IR" and msg_type == "Ind (12 8B)":
+                                code = "Ind"
+                            elif raw_code == "R_" and msg_type == "Recall (12 48)":
+                                code = "Recall"
+
+                            if code:
+                                packetswitch_times.append(time_minus_one)
+                                packetswitch_codes.append(code)
+                                packetswitch_count[key] = count + 1
+                                continue
+
                 tenth_digit_is_nine = False
                 try:
                     fractional = pcap_time.split(".")[-1]
@@ -1379,6 +1468,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
     adjust_ixl_component_column(ws, header_row_idx=2, start_row=2, ixl_component_col_index=6, min_width=28, max_width=60)
 
     yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
     COL_WS_TYPE = 15
     COL_WS_NUM = 16
     last_by_group = {}
@@ -1403,6 +1493,60 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
         if current != expected:
             ws.cell(row=r, column=COL_WS_NUM).fill = yellow_fill
         last_by_group[group] = current
+
+    
+    # Track last WS data for Ind and Control
+    last_ind_data = None
+    last_ctrl_data = None
+
+    # Column indexes (based on your layout)
+    COL_WS_TYPE = 15
+    COL_WS_DATA = 17
+
+    COL_PS_TIME = 19
+    COL_PS_COMPONENT = 20
+    COL_PS_DATA = 21
+    COL_PS_TYPE = 22
+
+    for r in range(2, ws.max_row + 1):
+
+        ws_type = ws.cell(row=r, column=COL_WS_TYPE).value
+        ws_data = ws.cell(row=r, column=COL_WS_DATA).value
+
+        # Skip empty rows
+        if not ws_type or not ws_data:
+            continue
+
+        # Normalize type
+        if "Ind" in str(ws_type):
+            current_type = "Ind"
+        elif "Control" in str(ws_type):
+            current_type = "Control"
+        else:
+            continue
+
+        # Get last value
+        last_val = last_ind_data if current_type == "Ind" else last_ctrl_data
+
+        # Detect change
+        changed = False
+        if last_val is not None and ws_data != last_val:
+            changed = True
+
+        # If changed, check Packetswitch
+        if changed:
+            ps_time_val = ws.cell(row=r, column=COL_PS_TIME).value
+
+            if not ps_time_val or str(ps_time_val).strip() == "":
+                #  Highlight ALL 4 Packetswitch columns
+                for col in [COL_PS_TIME, COL_PS_COMPONENT, COL_PS_DATA, COL_PS_TYPE]:
+                    ws.cell(row=r, column=col).fill = orange_fill
+
+        # Update last values
+        if current_type == "Ind":
+            last_ind_data = ws_data
+        elif current_type == "Control":
+            last_ctrl_data = ws_data
 
     wb.save(output_file_path)
     messagebox.showinfo(
