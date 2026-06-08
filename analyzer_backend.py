@@ -1,3 +1,5 @@
+# Latest with Repeat time tag case & PS Comp formating: 
+
 # analyzer_backend.py
 """
 Backend logic for the Log Packet Analysis Tool.
@@ -1547,6 +1549,42 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
             last_ind_data = ws_data
         elif current_type == "Control":
             last_ctrl_data = ws_data
+
+
+    # Format Packetswitch component column like IXL
+
+    COL_PS_COMPONENT = 20  # Packetswitch component column
+
+    for r in range(2, ws.max_row + 1):
+        cell = ws.cell(row=r, column=COL_PS_COMPONENT)
+        val = cell.value
+
+        if val and isinstance(val, str):
+            # Replace "/" with new lines
+            parts = [p.strip() for p in val.split("/") if p.strip()]
+            
+            if len(parts) > 1:
+                formatted_text = "See more ...\n" + "\n".join(parts)
+            else:
+                formatted_text = parts[0] if parts else ""
+
+            cell.value = formatted_text
+
+            # Wrap and align
+            cell.alignment = Alignment(
+                wrap_text=True,
+                horizontal="center",
+                vertical="top"
+            )
+
+    # Set fixed width for Packetswitch component column
+    ws.column_dimensions[get_column_letter(COL_PS_COMPONENT)].width = 20
+
+    # Set fixed row height for better readability
+    for r in range(2, ws.max_row + 1):
+        ws.row_dimensions[r].height = 15
+
+
 
     wb.save(output_file_path)
     messagebox.showinfo(
