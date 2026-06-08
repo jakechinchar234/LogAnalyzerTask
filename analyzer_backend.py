@@ -1155,6 +1155,19 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
             packetswitch_times = []
             packetswitch_codes = []
             packetswitch_count = {}
+            last_ws_by_type = {"Ind": None, "Control": None}
+            
+            # Count WS entries per (time, type)
+            ws_time_type_count = {}
+
+            for e in ws_entries:
+                t = e[0].split(".")[0] if e[0] else None
+                mt = e[1]
+
+                if t:
+                    key = (t, mt)
+                    ws_time_type_count[key] = ws_time_type_count.get(key, 0) + 1
+
             for entry in ws_entries:
                 msg_type_raw = entry[1].split("(")[-1].strip(")") if "(" in entry[1] else entry[1]
                 if msg_type_raw not in ["12 8B", "12 01", "12 48"]:
@@ -1163,6 +1176,37 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                     continue
                 pcap_time = entry[0]
                 msg_type = entry[1]
+                
+                ws_data = entry[3].replace(" ", "").upper()
+
+                if "Ind" in msg_type:
+                    key_type = "Ind"
+                elif "Control" in msg_type:
+                    key_type = "Control"   
+                elif "Recall" in msg_type:
+                    key_type = "Recall"
+                else:
+                    key_type = None
+
+
+                prev_ws = last_ws_by_type.get(key_type)
+
+                time_tag_simple = pcap_time.split(".")[0] if pcap_time else None
+                duplicate_count = ws_time_type_count.get((time_tag_simple, msg_type), 1)
+
+                # Recall always allowed
+                if key_type == "Recall":
+                    is_change = True
+
+                # If ONLY ONE WS entry → always allow
+                elif duplicate_count == 1:
+                    is_change = True
+
+                # If MULTIPLE entries → require actual change
+                else:
+                    is_change = (prev_ws is None or ws_data != prev_ws)
+
+
                 code = ""
                 if pcap_time:
                     time_tag = pcap_time.split(".")[0]
@@ -1213,10 +1257,14 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                             elif raw_code == "R_" and msg_type == "Recall (12 48)":
                                 code = "Recall"
                             if code:
-                                packetswitch_times.append(time_tag)
-                                packetswitch_codes.append(code)
-                                packetswitch_count[key] = count + 1
-                                continue
+                                if is_change:
+                                    packetswitch_times.append(time_tag)
+                                    packetswitch_codes.append(code)
+                                    packetswitch_count[key] = count + 1
+                                    continue
+                                else:
+                                    code = ""
+
                 
                 # NEW: fallback search for -1 second mismatch
                 if not code:
@@ -1243,11 +1291,17 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                             elif raw_code == "R_" and msg_type == "Recall (12 48)":
                                 code = "Recall"
 
+
                             if code:
-                                packetswitch_times.append(time_minus_one)
-                                packetswitch_codes.append(code)
-                                packetswitch_count[key] = count + 1
-                                continue
+                                if is_change:
+                                    packetswitch_times.append(time_minus_one)
+                                    packetswitch_codes.append(code)
+                                    packetswitch_count[key] = count + 1
+                                    continue
+                                else:
+                                    code = ""
+
+
 
                 tenth_digit_is_nine = False
                 try:
@@ -1276,11 +1330,21 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                                 code = "Ind"
                             elif raw_code == "R_" and msg_type == "Recall (12 48)":
                                 code = "Recall"
+
                             if code:
-                                packetswitch_times.append(adjusted_time)
-                                packetswitch_codes.append(code)
-                                packetswitch_count[key] = count + 1
-                                continue
+                                if is_change:
+                                    packetswitch_times.append(adjusted_time)
+                                    packetswitch_codes.append(code)
+                                    packetswitch_count[key] = count + 1
+                                    continue
+                                else:
+                                    code = ""
+
+
+                            
+                if key_type:
+                    last_ws_by_type[key_type] = ws_data
+
                 packetswitch_times.append("")
                 packetswitch_codes.append("")
 
