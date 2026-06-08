@@ -1,4 +1,4 @@
-# Latest with Repeat time tag case & PS Comp formating: 
+# Latest with Repeat time tag case: 
 
 # analyzer_backend.py
 """
@@ -1471,9 +1471,38 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
 
     yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
     orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+    red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
     COL_WS_TYPE = 15
     COL_WS_NUM = 16
     last_by_group = {}
+
+    
+    # Build lookup: group → list of (row, msg_num, time)
+    group_entries = {}
+
+    for r in range(2, ws.max_row + 1):
+        ws_type_val = ws.cell(row=r, column=COL_WS_TYPE).value
+        ws_num_val = ws.cell(row=r, column=COL_WS_NUM).value
+        ws_time_val = ws.cell(row=r, column=14).value  # WS time column
+
+        if not ws_type_val or not ws_num_val or not ws_time_val:
+            continue
+
+        group = _group_from_msg_type_cell(ws_type_val)
+
+        try:
+            msg_num = int(str(ws_num_val).strip(), 16)
+        except Exception:
+            continue
+
+        try:
+            time_val = parse_time_only(ws_time_val)
+        except Exception:
+            continue
+
+        group_entries.setdefault(group, []).append((r, msg_num, time_val))
+
+
     for r in range(2, ws.max_row + 1):
         ws_type_val = ws.cell(row=r, column=COL_WS_TYPE).value
         ws_num_val = ws.cell(row=r, column=COL_WS_NUM).value
@@ -1492,9 +1521,30 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
             last_by_group[group] = current
             continue
         expected = (last + 2) % 256
+
         if current != expected:
             ws.cell(row=r, column=COL_WS_NUM).fill = yellow_fill
+
+            # Check for missing previous message
+            prev_expected = (current - 2) % 256
+
+            found_prev = False
+
+            group_list = group_entries.get(group, [])
+
+            for rr, msg_num, time_val in group_list:
+                if msg_num == prev_expected:
+                    # check time difference
+                    if abs((time_val - parse_time_only(ws.cell(row=r, column=14).value)).total_seconds()) <= 90:
+                        found_prev = True
+                        break
+
+            # If previous NOT found → make RED
+            if not found_prev:
+                ws.cell(row=r, column=COL_WS_NUM).fill = red_fill
+
         last_by_group[group] = current
+
 
     
     # Track last WS data for Ind and Control
