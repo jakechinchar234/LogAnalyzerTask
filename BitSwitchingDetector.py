@@ -1,3 +1,5 @@
+# Latest morning 6/8
+
 
 """
 BitSwitchingDetector - Packetswitch component extractor
@@ -17,6 +19,11 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from openpyxl import load_workbook
 from docx import Document
+
+
+def _norm(s: str) -> str:
+    return str(s).replace(" ", "").upper()
+
 
 # ---------- File readers ----------
 
@@ -46,7 +53,8 @@ def read_packetswitch_lines(file_path: str) -> List[str]:
         return text.strip().split("\n")
 
 
-def read_signal_labels(excel_path: str) -> Tuple[List[str], List[str]]:
+
+def read_signal_labels(excel_path: str, location_name: str = None) -> Tuple[List[str], List[str]]:
     """Read Indication and Control labels from Column D of two sheets."""
     wb = load_workbook(filename=excel_path, data_only=True)
     names = wb.sheetnames
@@ -74,7 +82,30 @@ def read_signal_labels(excel_path: str) -> Tuple[List[str], List[str]]:
 
     def col_d_values(ws):
         labels: List[str] = []
-        for col in ws.iter_cols(min_row=2, min_col=4, max_col=4, values_only=True):
+
+        
+        start_row = 2
+
+
+        if location_name:
+            target = _norm(location_name)
+
+            # First pass: exact match
+            for r in ws.iter_rows(min_row=2):
+                cell_val = r[1].value
+                if cell_val and _norm(cell_val) == target:
+                    start_row = r[0].row
+                    break
+            else:
+                # Second pass: partial match (fallback)
+                for r in ws.iter_rows(min_row=2):
+                    cell_val = r[1].value
+                    if cell_val and target in _norm(cell_val):
+                        start_row = r[0].row
+                        break
+
+
+        for col in ws.iter_cols(min_row=start_row, min_col=4, max_col=4, values_only=True):
             for v in col:
                 if v is None:
                     continue
@@ -192,9 +223,35 @@ def detect_bit_switches(ps_lines: List[str], indications: List[str], controls: L
 def build_component_map(packetswitch_file_path: str, excel_file_path: str) -> Dict[Tuple[str, str], str]:
     """Read files and return {(HH:MM:SS, 'Ind'|'Control'): component}."""
     ps_lines = read_packetswitch_lines(packetswitch_file_path)
+    
+
+    location_name = None
+
+    for line in ps_lines:
+
+        # Only use RF lines
+        if "(RF)" not in line:
+            continue
+
+        if ":" in line:
+            try:
+                before_colon = line.rsplit(":", 1)[0]
+                parts = before_colon.split()
+
+                if parts:
+                    location_name = parts[-1].strip()
+
+                    print("LOCATION FOUND:", location_name)
+                    break
+
+            except Exception:
+                continue
+
+
     if not ps_lines:
         return {}
-    indications, controls = read_signal_labels(excel_file_path)
+
+    indications, controls = read_signal_labels(excel_file_path, location_name)
     if not indications and not controls:
         return {}
     entries = detect_bit_switches(ps_lines, indications, controls)
