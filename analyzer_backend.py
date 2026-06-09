@@ -34,7 +34,9 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
+# component
 from BitSwitchingDetector import build_component_map
+from NonGenericComponentDetector import build_component_map_non_generic
 
 def _normalize_atcs(addr: str) -> str:
     """Normalize ATCS address for comparison."""
@@ -813,17 +815,36 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
     last_two_sequences = []
     recent_sequence_times = {}
 
+
     component_map = {}
 
-    if packetswitch_file_path and ixl_excel_file_path:
+    if packetswitch_file_path:
         try:
-            component_map = build_component_map(
-                packetswitch_file_path,
-                ixl_excel_file_path
-            )
+            with open(packetswitch_file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+
+            # Detect type
+            is_generic = "Generic Report Results" in content
+
+            if is_generic:
+                if ixl_excel_file_path:
+                    component_map = build_component_map(
+                        packetswitch_file_path,
+                        ixl_excel_file_path
+                    )
+                    print("Using BitSwitchingDetector")
+            else:
+                component_map = build_component_map_non_generic(
+                    packetswitch_file_path
+                )
+                print("Using NonGenericComponentDetector")
+
             print(f"Component map size: {len(component_map)}")
+
         except Exception as e:
-            print("BitSwitchingDetector failed:", e)
+            print("Component detection failed:", e)
+
+
 
 
     if log_file_path != False:
