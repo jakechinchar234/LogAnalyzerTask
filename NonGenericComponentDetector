@@ -3,8 +3,11 @@
 NonGenericComponentDetector
 
 Handles NON-generic Packetswitch HTML files with:
-- RED text (ON)
+- RED text (ON)  → via CSS / inherited
 - STRIKETHROUGH (OFF)
+
+Also supports RAW files (no color):
+→ defaults components to ON
 
 Returns:
     {(time_tag, 'Ind'|'Control'|'Recall'): "component On / component Off"}
@@ -19,14 +22,40 @@ from bs4 import BeautifulSoup
 # HELPERS
 # =========================
 
+
 def is_red(node):
-    """Check node and its parents for red color (inherited)."""
+    """Detect ON using actual HTML attribute color='red'."""
     while node is not None:
         try:
             if hasattr(node, "attrs"):
-                attrs = str(node.attrs).lower()
+                # direct attribute check (this is your real case)
+                if node.get("color") == "red":
+                    return True
 
-                if "rgb(255, 0, 0)" in attrs or "color:red" in attrs:
+                # fallback safety (if format varies slightly)
+                attrs = str(node.attrs).lower()
+                if "color" in attrs and "red" in attrs:
+                    return True
+
+        except Exception:
+            pass
+
+        node = getattr(node, "parent", None)
+
+    return False
+
+
+
+def is_strike(node):
+    """Check if node represents OFF (strike)."""
+    while node is not None:
+        try:
+            if getattr(node, "name", "") == "strike":
+                return True
+
+            if hasattr(node, "attrs"):
+                attrs = str(node.attrs).lower()
+                if "line-through" in attrs:
                     return True
         except Exception:
             pass
@@ -36,20 +65,12 @@ def is_red(node):
     return False
 
 
-def is_strike(node):
-    """Check if node represents OFF (strike)."""
-    try:
-        if getattr(node, "name", "") == "strike":
-            return True
-
-        if hasattr(node, "attrs"):
-            attrs = str(node.attrs).lower()
-            if "line-through" in attrs:
-                return True
-    except Exception:
-        pass
-
-    return False
+def is_valid_component(token: str):
+    """Filter only real signal components."""
+    return bool(
+        re.match(r"\d+[A-Z]+", token) or   # 17NWZ, 3WLK, etc.
+        ("(" in token and ")" in token)    # SM(OFF)
+    )
 
 
 # =========================
@@ -60,13 +81,16 @@ def parse_html_with_colors(file_path: str) -> Dict[Tuple[str, str], str]:
     comp_map: Dict[Tuple[str, str], str] = {}
 
     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-        soup = BeautifulSoup(f, "html.parser")
+        html = f.read()
 
-    # Loop through ALL tags (robust for messy HTML)
+    soup = BeautifulSoup(html, "html.parser")
+
+    # ✅ Detect if file contains ANY color info
+    has_color = "rgb(" in html or "color:" in html
+
     for tag in soup.find_all(True):
         line = tag.get_text(strip=True)
 
-        # Match packetswitch line
         match = re.match(r"P\d+\s+(\d{2}:\d{2}:\d{2})\s+_(..)", line)
         if not match:
             continue
@@ -84,8 +108,8 @@ def parse_html_with_colors(file_path: str) -> Dict[Tuple[str, str], str]:
             continue
 
         components = []
+        seen = set()  # ✅ prevent duplicates
 
-        # Walk through ALL nested elements
         for child in tag.descendants:
 
             if not hasattr(child, "get_text"):
@@ -99,23 +123,34 @@ def parse_html_with_colors(file_path: str) -> Dict[Tuple[str, str], str]:
 
             for token in tokens:
 
-                # Skip non-component tokens
-                if not re.search(r"[A-Z]", token):
+                if not is_valid_component(token):
                     continue
 
-                # OFF takes priority
+                if token in seen:
+                    continue
+
+                # ✅ OFF (highest priority)
                 if is_strike(child):
                     components.append(f"{token} Off")
+                    seen.add(token)
 
-                # ON detection (inherited red)
+                # ✅ ON (explicit red)
                 elif is_red(child):
                     components.append(f"{token} On")
+                    seen.add(token)
+
+                # ✅ RAW FALLBACK (no color anywhere in file)
+                elif not has_color:
+                    components.append(f"{token} On")
+                    seen.add(token)
+
+                # ✅ Otherwise ignore (blue/green/etc)
 
         if components:
             comp_map[(time_tag, msg_type)] = " / ".join(components)
 
-            # DEBUG (can remove later)
-            print("FOUND:", (time_tag, msg_type), components[:5])
+            # DEBUG
+            print("FINAL:", (time_tag, msg_type), components[:6])
 
     return comp_map
 
