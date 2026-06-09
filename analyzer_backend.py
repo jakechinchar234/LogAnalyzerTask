@@ -1348,6 +1348,49 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                 packetswitch_times.append("")
                 packetswitch_codes.append("")
 
+
+            
+            # NEW: post-fix misalignment for duplicate time tags
+            for i in range(1, len(ws_entries) - 1):
+                curr_time = ws_entries[i][0]
+                prev_time = ws_entries[i - 1][0]
+                next_time = ws_entries[i + 1][0]
+
+                if not curr_time or not prev_time or not next_time:
+                    continue
+
+                curr_simple = curr_time.split(".")[0]
+                prev_simple = prev_time.split(".")[0]
+                next_simple = next_time.split(".")[0]
+
+                curr_type = ws_entries[i][1]
+                prev_type = ws_entries[i - 1][1]
+                next_type = ws_entries[i + 1][1]
+
+                # must all be same group (time + type)
+                if not (curr_simple == prev_simple == next_simple and curr_type == prev_type == next_type):
+                    continue
+
+                # get data
+                curr_data = ws_entries[i][3].replace(" ", "").upper()
+                prev_data = ws_entries[i - 1][3].replace(" ", "").upper()
+                next_data = ws_entries[i + 1][3].replace(" ", "").upper()
+
+                # CONDITION:
+                # middle = no change
+                # next = change
+                if curr_data == prev_data and next_data != curr_data:
+
+                    # middle has PS, next does NOT
+                    if packetswitch_codes[i] and not packetswitch_codes[i + 1]:
+
+                        # MOVE the packetswitch info DOWN
+                        packetswitch_times[i + 1] = packetswitch_times[i]
+                        packetswitch_codes[i + 1] = packetswitch_codes[i]
+
+                        packetswitch_times[i] = ""
+                        packetswitch_codes[i] = ""
+
             components = []
 
             for i in range(len(packetswitch_times)):
