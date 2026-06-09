@@ -66,11 +66,12 @@ def is_strike(node):
 
 
 def is_valid_component(token: str):
-    """Filter only real signal components."""
     return bool(
-        re.match(r"\d+[A-Z]+", token) or   # 17NWZ, 3WLK, etc.
-        ("(" in token and ")" in token)    # SM(OFF)
+        re.match(r"\d+[A-Z]+", token) or   # 17NWZ, 3WLK
+        re.match(r"[A-Z]{3,}", token) or   # DOORX, etc.
+        ("(" in token and ")" in token)
     )
+
 
 
 # =========================
@@ -85,7 +86,7 @@ def parse_html_with_colors(file_path: str) -> Dict[Tuple[str, str], str]:
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # ✅ Detect if file contains ANY color info
+    # Detect if file contains ANY color info
     has_color = "rgb(" in html or "color:" in html
 
     for tag in soup.find_all(True):
@@ -108,7 +109,7 @@ def parse_html_with_colors(file_path: str) -> Dict[Tuple[str, str], str]:
             continue
 
         components = []
-        seen = set()  # ✅ prevent duplicates
+        seen = set()  # prevent duplicates
 
         for child in tag.descendants:
 
@@ -129,28 +130,28 @@ def parse_html_with_colors(file_path: str) -> Dict[Tuple[str, str], str]:
                 if token in seen:
                     continue
 
-                # ✅ OFF (highest priority)
+                # OFF (highest priority)
                 if is_strike(child):
                     components.append(f"{token} Off")
                     seen.add(token)
 
-                # ✅ ON (explicit red)
+                # ON (explicit red)
                 elif is_red(child):
                     components.append(f"{token} On")
                     seen.add(token)
 
-                # ✅ RAW FALLBACK (no color anywhere in file)
+                # RAW FALLBACK (no color anywhere in file)
                 elif not has_color:
                     components.append(f"{token} On")
                     seen.add(token)
 
-                # ✅ Otherwise ignore (blue/green/etc)
+                # Otherwise ignore (blue/green/etc)
 
         if components:
             comp_map[(time_tag, msg_type)] = " / ".join(components)
 
             # DEBUG
-            print("FINAL:", (time_tag, msg_type), components[:6])
+            # print("FINAL:", (time_tag, msg_type), components[:6])
 
     return comp_map
 
