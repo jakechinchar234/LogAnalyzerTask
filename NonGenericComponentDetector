@@ -1,0 +1,128 @@
+
+"""
+NonGenericComponentDetector
+
+Handles NON-generic Packetswitch HTML files with:
+- RED text (ON)
+- STRIKETHROUGH (OFF)
+
+Returns:
+    {(time_tag, 'Ind'|'Control'|'Recall'): "component On / component Off"}
+"""
+
+import re
+from typing import Dict, Tuple
+from bs4 import BeautifulSoup
+
+
+# =========================
+# HELPERS
+# =========================
+
+def is_red(node):
+    """Check node and its parents for red color (inherited)."""
+    while node is not None:
+        try:
+            if hasattr(node, "attrs"):
+                attrs = str(node.attrs).lower()
+
+                if "rgb(255, 0, 0)" in attrs or "color:red" in attrs:
+                    return True
+        except Exception:
+            pass
+
+        node = getattr(node, "parent", None)
+
+    return False
+
+
+def is_strike(node):
+    """Check if node represents OFF (strike)."""
+    try:
+        if getattr(node, "name", "") == "strike":
+            return True
+
+        if hasattr(node, "attrs"):
+            attrs = str(node.attrs).lower()
+            if "line-through" in attrs:
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+# =========================
+# CORE PARSER
+# =========================
+
+def parse_html_with_colors(file_path: str) -> Dict[Tuple[str, str], str]:
+    comp_map: Dict[Tuple[str, str], str] = {}
+
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        soup = BeautifulSoup(f, "html.parser")
+
+    # Loop through ALL tags (robust for messy HTML)
+    for tag in soup.find_all(True):
+        line = tag.get_text(strip=True)
+
+        # Match packetswitch line
+        match = re.match(r"P\d+\s+(\d{2}:\d{2}:\d{2})\s+_(..)", line)
+        if not match:
+            continue
+
+        time_tag = match.group(1)
+        raw_code = match.group(2)
+
+        if raw_code == "IR":
+            msg_type = "Ind"
+        elif raw_code == "CR":
+            msg_type = "Control"
+        elif raw_code == "R_":
+            msg_type = "Recall"
+        else:
+            continue
+
+        components = []
+
+        # Walk through ALL nested elements
+        for child in tag.descendants:
+
+            if not hasattr(child, "get_text"):
+                continue
+
+            text = child.get_text(strip=True)
+            if not text:
+                continue
+
+            tokens = [t.strip(", ") for t in text.split() if t.strip()]
+
+            for token in tokens:
+
+                # Skip non-component tokens
+                if not re.search(r"[A-Z]", token):
+                    continue
+
+                # OFF takes priority
+                if is_strike(child):
+                    components.append(f"{token} Off")
+
+                # ON detection (inherited red)
+                elif is_red(child):
+                    components.append(f"{token} On")
+
+        if components:
+            comp_map[(time_tag, msg_type)] = " / ".join(components)
+
+            # DEBUG (can remove later)
+            print("FOUND:", (time_tag, msg_type), components[:5])
+
+    return comp_map
+
+
+# =========================
+# PUBLIC API
+# =========================
+
+def build_component_map_non_generic(packetswitch_file_path: str):
+    return parse_html_with_colors(packetswitch_file_path)
