@@ -147,11 +147,16 @@ def parse_html_with_colors(file_path: str) -> Dict[Tuple[str, str], str]:
 
                 # Otherwise ignore (blue/green/etc)
 
-        if components:
-            comp_map[(time_tag, msg_type)] = " / ".join(components)
+        key = (time_tag, msg_type)
 
-            # DEBUG
-            # print("FINAL:", (time_tag, msg_type), components[:6])
+        if key not in comp_map:
+            comp_map[key] = []
+
+        comp_map[key].append(" / ".join(components))
+
+
+        # DEBUG
+        # print("FINAL:", (time_tag, msg_type), components[:6])
 
     return comp_map
 
