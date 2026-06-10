@@ -1430,7 +1430,13 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
 
                     if key_type:
                         key = (time_tag, key_type)
-                        component_val = component_map.get(key, "")
+                        component_list = component_map.get(key, [])
+
+                        if component_list:
+                            component_val = component_list.pop(0)  # take next available entry
+                        else:
+                            component_val = ""
+
 
                 components.append(component_val)
 
@@ -1736,6 +1742,15 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
     for r in range(2, ws.max_row + 1):
         cell = ws.cell(row=r, column=COL_PS_COMPONENT)
         val = cell.value
+        
+        # Fix list → string BEFORE processing
+        if isinstance(val, list):
+            val = val[0] if val else ""
+
+        # Clean string formatting
+        if isinstance(val, str):
+            val = val.strip("[]").strip("'").strip('"')
+
 
         if val and isinstance(val, str):
             # Replace "/" with new lines
