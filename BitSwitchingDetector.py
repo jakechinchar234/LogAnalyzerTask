@@ -203,12 +203,15 @@ def detect_bit_switches(ps_lines: List[str], indications: List[str], controls: L
                 if s not in active:
                     changed.append(f"{s} Off")
 
-        if changed:
-            results.append({
-                "time": timestamp,
-                "type": comm_type,
-                "component": " / ".join(changed)
-            })
+
+        component_str = " / ".join(changed) if changed else ""
+
+        results.append({
+            "time": timestamp,
+            "type": comm_type,
+            "component": component_str
+        })
+
 
         # Update previous state
         if comm_type == "Ind":
@@ -255,7 +258,15 @@ def build_component_map(packetswitch_file_path: str, excel_file_path: str) -> Di
     if not indications and not controls:
         return {}
     entries = detect_bit_switches(ps_lines, indications, controls)
-    comp_map: Dict[Tuple[str, str], str] = {}
+
+    comp_map: Dict[Tuple[str, str], List[str]] = {}
+
     for e in entries:
-        comp_map[(e["time"], e["type"])] = e["component"].strip()
+        key = (e["time"], e["type"])
+
+        if key not in comp_map:
+            comp_map[key] = []
+
+        comp_map[key].append(e["component"].strip())
+
     return comp_map
