@@ -1777,6 +1777,42 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
     for r in range(2, ws.max_row + 1):
         ws.row_dimensions[r].height = 15
 
+    from openpyxl.styles import Font
+ 
+    legend_ws = wb.create_sheet("Legend")
+ 
+    # Title
+    legend_ws["A1"] = "Legend"
+    legend_ws["A1"].font = Font(bold=True)
+ 
+    # Headers
+    legend_ws["A2"] = "Color"
+    legend_ws["B2"] = "Meaning"
+    legend_ws["A2"].font = Font(bold=True)
+    legend_ws["B2"].font = Font(bold=True)
+ 
+    # Define legend entries
+    legend_items = [
+        ("Out of Order Sequence", "FFFF00", "Sequence mismatch detected in Wireshark log"),
+        ("Missing Message", "FF0000", "Data loss detected in log"),
+        ("Missing Packetswitch Data", "FFA500", "Detected a missing packetswitch data entry"),
+    ]
+ 
+    # Populate rows
+    for i, (label, color, description) in enumerate(legend_items, start=3):
+        cell = legend_ws.cell(row=i, column=1)
+       
+        cell.fill = PatternFill(
+            start_color=color,
+            end_color=color,
+            fill_type="solid"
+        )
+ 
+        legend_ws.cell(row=i, column=2, value=f"{label}: {description}")
+ 
+    # Adjust column widths
+    legend_ws.column_dimensions["A"].width = 30
+    legend_ws.column_dimensions["B"].width = 70
 
 
     wb.save(output_file_path)
