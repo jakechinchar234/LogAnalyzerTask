@@ -1052,9 +1052,24 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                             else:
                                 msg_number = hex_parts[i - 1] if i > 0 else None
                                 msg_type_raw = f"{hex_parts[i + 2]} {hex_parts[i + 3]}"
-                            msg_type = msg_type_raw
-                            if msg_type_raw == "04 D0":
+
+
+                            # NEW VALIDATION (allows message types with odd characters + exceptions)
+                            valid_hex_chars = {"1", "3", "5", "7", "9", "A", "C", "E"}
+                            bytes_split = msg_type_raw.split()
+                            first_byte = bytes_split[0]
+
+                            is_valid = (
+                                any(any(char in valid_hex_chars for char in byte) for byte in bytes_split)
+                                or first_byte in {"08", "22"}
+                            )
+
+                            if not is_valid:
                                 continue
+
+                            msg_type = msg_type_raw
+                                    
+                                
                             if msg_type_raw == "12 8B":
                                 msg_type = "Ind (12 8B)"
                             elif msg_type_raw == "12 01":
