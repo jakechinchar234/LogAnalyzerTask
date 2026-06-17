@@ -1233,6 +1233,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                     time_tag = pcap_time.split(".")[0]
                     
                     time_minus_one = (datetime.strptime(time_tag, "%H:%M:%S") - timedelta(seconds=1)).strftime("%H:%M:%S")
+                    time_minus_two = (datetime.strptime(time_tag, "%H:%M:%S") - timedelta(seconds=2)).strftime("%H:%M:%S")
 
                     key = (time_tag, msg_type)
                     count = packetswitch_count.get(key, 0)
@@ -1316,6 +1317,40 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                             if code:
                                 if is_change:
                                     packetswitch_times.append(time_minus_one)
+                                    packetswitch_codes.append(code)
+                                    packetswitch_count[key] = count + 1
+                                    continue
+                                else:
+                                    code = ""
+
+                # NEW: fallback search for -2 second mismatch
+                if not code:
+                    key = (time_minus_two, msg_type)
+                    count = packetswitch_count.get(key, 0)
+                    idx = -1
+
+                    for _ in range(count + 1):
+                        idx = html_text.find(time_minus_two, idx + 1)
+                        if idx == -1:
+                            break
+
+                    if idx != -1:
+                        after = html_text[idx:]
+                        underscore_idx = after.find("_")
+
+                        if underscore_idx != -1 and len(after) > underscore_idx + 2:
+                            raw_code = after[underscore_idx + 1 : underscore_idx + 3]
+
+                            if raw_code == "CR" and msg_type == "Control (12 01)":
+                                code = "Control"
+                            elif raw_code == "IR" and msg_type == "Ind (12 8B)":
+                                code = "Ind"
+                            elif raw_code == "R_" and msg_type == "Recall (12 48)":
+                                code = "Recall"
+
+                            if code:
+                                if is_change:
+                                    packetswitch_times.append(time_minus_two)
                                     packetswitch_codes.append(code)
                                     packetswitch_count[key] = count + 1
                                     continue
@@ -1479,7 +1514,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                             time_diff = abs((ps_time - ws_time).total_seconds()) if ws_time else None
                         except Exception:
                             time_diff = None
-                        if time_diff is not None and time_diff <= 1:
+                        if time_diff is not None and time_diff <= 2:
                             if ws_entry[1] in ("RF_ACK (Outbound)", "RF_ACK (Inbound)"):
                                 continue
                             if description == "Indic(RF)":
@@ -1511,6 +1546,14 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                             if key_type:
                                 key = (time_key, key_type)
                                 component_val = component_map.get(key, "")
+
+                                # CLEAN UP [''] and list cases
+                                if isinstance(component_val, list):
+                                    if not component_val or component_val == [""]:
+                                        component_val = ""
+                                    else:
+                                        component_val = component_val[0]
+
 
                             packetswitch_components.append(component_val)
 
