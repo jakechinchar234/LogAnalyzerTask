@@ -32,11 +32,14 @@ from scapy.layers.inet import TCP
 
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, PatternFill
+# new:
 from openpyxl.utils import get_column_letter
 
 # component
 from BitSwitchingDetector import build_component_map
 from NonGenericComponentDetector import build_component_map_non_generic
+from office_parser import parse_office_file
+from office_parser import match_office_to_packetswitch
 
 def _normalize_atcs(addr: str) -> str:
     """Normalize ATCS address for comparison."""
@@ -809,6 +812,37 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
         messagebox.showerror("Error", "The output file is currently open. Please close it and try again.")
         return
 
+    
+    # ========================
+    # HARDCODED OFFICE FILE (TEMP)
+    # ========================
+    office_file_path = r"C:\Users\chin234167\OneDrive - Hatch Ltd\Documents\LogAnalyzerTask\Port Credit\Port Credit T2GE 03.03.2025 0100-0830H.html"
+
+    # ========================
+    # OFFICE FILE PARSING (TEMP)
+    # ========================
+    office_entries = []
+
+    if os.path.isfile(office_file_path):
+        try:
+            office_entries = parse_office_file(office_file_path)
+        except Exception as e:
+            print(f"Office parsing failed: {e}")
+            office_entries = []
+    else:
+        print("Office file not found (hardcoded path)")
+
+        
+    # Normalize office entries (REQUIRED for matching)
+    for entry in office_entries:
+        entry["_data_norm"] = normalize_hex_no_spaces(entry.get("data_hex", ""))
+        entry["_time_obj"] = None
+        try:
+            entry["_time_obj"] = parse_time_flexible(entry.get("time_tag", ""))
+        except:
+            pass
+
+
     cm_entries = []
     ws_entries = []
     time_differences = []
@@ -1490,6 +1524,51 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
 
                 components.append(component_val)
 
+
+            # ========================
+            # MATCH OFFICE TO PACKETSWITCH
+            # ========================
+            office_components = []
+
+            for i in range(len(ws_entries)):
+                ps_time = packetswitch_times[i]
+                ws_data = ws_entries[i][3]
+
+                ps_data_norm = normalize_hex_no_spaces(ws_data)
+
+                try:
+                    ps_time_obj = parse_time_flexible(ps_time)
+                except:
+                    ps_time_obj = None
+
+                matched_office = None
+
+                for office in office_entries:
+                    # PRIMARY: data match
+                    if office["_data_norm"] != ps_data_norm:
+                        continue
+
+                    # SECONDARY: time check
+                    if office["_time_obj"] and ps_time_obj:
+                        if minutes_abs(office["_time_obj"], ps_time_obj) <= 8:
+                            matched_office = office
+                            break
+                    else:
+                        matched_office = office
+                        break
+
+                office_val = ""
+
+                if matched_office:
+                    office_val = matched_office.get("component", "")
+
+                    # CLEAN [''] issue automatically
+                    if isinstance(office_val, list):
+                        office_val = [x for x in office_val if x]
+                        office_val = "\n".join(office_val) if office_val else ""
+
+                office_components.append(office_val)
+
             packetswitch_df = pd.DataFrame(
                 {
                     "time tag": packetswitch_times,
@@ -1498,6 +1577,44 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                     "data type": packetswitch_codes,
                 }
             )
+
+            print("CALLING MATCH FUNCTION")
+
+            # Build packetswitch entries for matcher
+            packetswitch_entries_for_match = []
+
+            for i in range(len(packetswitch_times)):
+                packetswitch_entries_for_match.append({
+                    "time": packetswitch_times[i],
+                    "type": packetswitch_codes[i]
+                })
+
+            # CALL MATCHER
+            match_results = match_office_to_packetswitch(
+                office_entries,
+                packetswitch_entries_for_match
+            )
+
+            print(match_results[:10])            
+            # ========================
+            # BUILD OFFICE DATAFRAME (NEW)
+            # ========================
+            office_df = pd.DataFrame(match_results)
+
+            # Align office dataframe to main row count
+            row_count = len(cm_entries)
+
+            if len(office_df) < row_count:
+                padding = pd.DataFrame(
+                    [{"time_tag": "", "component": ""}] * (row_count - len(office_df))
+                )
+                office_df = pd.concat([office_df, padding], ignore_index=True)
+            else:
+                office_df = office_df.head(row_count)
+
+            # Rename to match your existing Excel headers
+            office_df.columns = ["time tag", "component"]
+
 
         else:
             packetswitch_times = []
@@ -1588,6 +1705,8 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                 "data type": packetswitch_codes,
             })
 
+
+
     combined_df = pd.concat([
         pd.DataFrame({"Number": list(range(1, len(cm_df) + 1))}),
         ixl_df,
@@ -1596,6 +1715,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
         diff_df,
         ws_df,
         packetswitch_df,
+        office_df,
     ], axis=1)
 
     header_row = [
@@ -1621,6 +1741,8 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
         "",
         "",
         "",
+        "Office Data",
+        "",
     ]
 
     with pd.ExcelWriter(output_file_path, engine="openpyxl") as writer:
@@ -1638,6 +1760,9 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
     ws.merge_cells(start_row=1, start_column=13, end_row=1, end_column=13)
     ws.merge_cells(start_row=1, start_column=14, end_row=1, end_column=18)
     ws.merge_cells(start_row=1, start_column=19, end_row=1, end_column=22)
+    ws.merge_cells(start_row=1, start_column=23, end_row=1, end_column=24)
+
+
 
     for col in [2, 7, 8, 13, 14, 19]:
         cell = ws.cell(row=1, column=col)
