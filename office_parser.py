@@ -205,7 +205,10 @@ def match_office_to_packetswitch(office_entries, packetswitch_entries):
                     if ("Remote Recall cmd" in office["full_line"]
                         or "REVERSE REQUEST IS" in office["full_line"].upper()                        
                         ):
-                        component_text = clean_component(office["full_line"])
+                        if ("Remote Recall cmd" in office["full_line"]):
+                            component_text = "Remote Recall cmd"
+                        else:
+                            component_text = "Reverse Request"
 
                         matched_components.append(component_text)
 
