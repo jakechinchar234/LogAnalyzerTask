@@ -1,6 +1,9 @@
 import re
 from datetime import datetime
 
+import os
+from docx import Document
+
 # -------- TIME PARSER --------
 def parse_time(timestr):
     """Convert HH:MM:SS to datetime object (same day baseline)"""
@@ -55,22 +58,39 @@ def parse_office_line(line):
 
 
 
-# -------- FILE PARSER --------
 def parse_office_file(filepath):
     """
     Returns list of parsed office entries
+    Supports TXT, HTML and DOCX
     """
 
     entries = []
 
-    with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            if "T2GE" not in line:
-                continue
+    ext = os.path.splitext(filepath)[1].lower()
 
-            parsed = parse_office_line(line)
-            if parsed:
-                entries.append(parsed)
+    # TXT / HTML
+    if ext in [".txt", ".html"]:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+
+    # DOCX
+    elif ext == ".docx":
+        doc = Document(filepath)
+        lines = [p.text for p in doc.paragraphs]
+
+    else:
+        raise ValueError(f"Unsupported office file type: {ext}")
+
+    for line in lines:
+        if "T2GE" not in line:
+            continue
+
+        parsed = parse_office_line(line)
+
+        if parsed:
+            entries.append(parsed)
+
+    print(f"Loaded {len(entries)} office entries from {filepath}")
 
     return entries
 
@@ -112,7 +132,7 @@ def match_office_to_packetswitch(office_entries, packetswitch_entries):
             indicator_match = True
         elif ps_type == "Control":
             keyword = "Signal Request"
-        else:
+        elif ps_type != "Recall":
             continue
 
 
@@ -170,6 +190,7 @@ def match_office_to_packetswitch(office_entries, packetswitch_entries):
                     if ("Signal Request" in office["full_line"]
                         or "NORMAL REQUEST IS" in office["full_line"].upper()
                         or "REVERSE REQUEST IS" in office["full_line"].upper()
+                        or "RESEND CONTROLS CMD" in office["full_line"].upper()
                         ):
                         
                         component_text = clean_component(office["component"])
@@ -182,12 +203,14 @@ def match_office_to_packetswitch(office_entries, packetswitch_entries):
 
                 elif ps_type == "Recall":
                     if ("Remote Recall cmd" in office["full_line"]
-                        or "RESEND CONTROLS CMD" in office["full_line"].upper()
                         or "REVERSE REQUEST IS" in office["full_line"].upper()                        
                         ):
-                        component_text = clean_component(office["component"])
+                        component_text = clean_component(office["full_line"])
 
                         matched_components.append(component_text)
+
+                        if not matched_time:
+                            matched_time = office["display_time"]
 
 
 
