@@ -189,6 +189,30 @@ def is_valid_packet(pkt, data_bytes: bytes, target_address: bytes) -> bool:
     return target_address in data_bytes and not TCP in pkt
 
 
+def format_ws_message_type(msg_type):
+    msg_type_2 = str(msg_type).strip()
+    mapping = {
+        "05 CD": "CM Local Status Reply (05 CD)",
+        "78 8B": "Sear Reply (78 8B)",
+        "D7 02": "Time Message (D7 02)",
+        "12 48": "Recall (12 48)",
+        "78 8D": "Label to wams COMMGR (78 8D)",
+    }
+
+
+    if msg_type in mapping:
+        return mapping[msg_type]
+
+    # Any message type beginning with 22
+    if msg_type_2.startswith("22 "):
+        return f"MCP Reset ({msg_type})"
+    if msg_type_2.startswith("08 "):
+        return f"Health Report ({msg_type})"
+
+    return msg_type
+
+
+
 def extract_ws_hex_data(pcap_path: str, ws_time_tag: str, msg_type_raw: str, fallback_hex: str = "") -> str:
     if msg_type_raw == "12 8B":
         wanted_label = "indication_bits"
@@ -279,10 +303,13 @@ def _normalize_group_from_raw(msg_type_raw: str) -> str:
     s = (msg_type_raw or "").upper().strip()
     if s in ("12 8B", "78 8B"):
         return "IND"
-    if s in ("12 01", "12 48"):
+    if s in ("12 01", "12 48", "D7 02"):
         return "CTL_RECALL"
     if s in ("08 82", "08 83"):
         return "GROUP_0882_0883"
+    if s in ("05 CD", "78 8D"):
+        return "GROUP_05CD_788D"
+
     return s
 
 
@@ -804,7 +831,7 @@ def find_pcap_time_bounds(file_path: str):
 # ========================
 
 def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_path, start_time_str,
-    end_time_str, packetswitch_file_path, target_address, filename_suffix):
+    end_time_str, packetswitch_file_path, office_file_path, target_address, filename_suffix):
 
     output_file_path = (f"log_packet_analysis_output_{filename_suffix or datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
 
@@ -812,18 +839,13 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
         messagebox.showerror("Error", "The output file is currently open. Please close it and try again.")
         return
 
-    
-    # ========================
-    # HARDCODED OFFICE FILE (TEMP)
-    # ========================
-    office_file_path = r"C:\Users\chin234167\OneDrive - Hatch Ltd\Documents\LogAnalyzerTask\Port Credit\Port Credit T2GE 03.03.2025 0100-0830H.html"
 
     # ========================
     # OFFICE FILE PARSING (TEMP)
     # ========================
     office_entries = []
 
-    if os.path.isfile(office_file_path):
+    if office_file_path and os.path.isfile(office_file_path):
         try:
             office_entries = parse_office_file(office_file_path)
         except Exception as e:
@@ -1130,6 +1152,11 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                             recent_sequence_times[hex_sequence] = datetime.fromtimestamp(float(pkt.time))
                             if pcap_time not in found_cm_times:
                                 additional_cm_entries.append(["Not found", "", "", "", ""])
+
+                            #####
+                            msg_type = format_ws_message_type(msg_type)
+                            #####
+                            
                             fallback_hex = " ".join([data_bytes.hex()[k:k+2] for k in range(0, len(data_bytes.hex()), 2)])
                             ws_hex_data = extract_ws_hex_data(pcap_file_path, pcap_time, msg_type_raw, fallback_hex)
                             additional_ws_entries.append([pcap_time, msg_type, msg_number, ws_hex_data, ""])
@@ -1194,7 +1221,12 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
     diff2_df = pd.DataFrame({" ": [""] * row_count})
     cm_df = pd.DataFrame(cm_entries, columns=["time tag", "msg type", "msg number", "data (hex)", "direction"])
     ws_df = pd.DataFrame(ws_entries, columns=["time tag", "msg type", "msg number", "data (hex)", "UDP/TCP"])
-    diff_df = pd.DataFrame(time_differences, columns=[" "])
+    diff_df = pd.DataFrame(time_differences, columns=[" "])  
+    office_df = pd.DataFrame({
+        "time tag": [""] * len(cm_entries),
+        "component": [""] * len(cm_entries)
+    })
+
 
     html_text = ""
     if packetswitch_file_path and os.path.isfile(packetswitch_file_path):
@@ -1578,7 +1610,6 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                 }
             )
 
-            print("CALLING MATCH FUNCTION")
 
             # Build packetswitch entries for matcher
             packetswitch_entries_for_match = []
@@ -1594,8 +1625,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                 office_entries,
                 packetswitch_entries_for_match
             )
-
-            print(match_results[:10])            
+          
             # ========================
             # BUILD OFFICE DATAFRAME (NEW)
             # ========================
@@ -1705,7 +1735,81 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
                 "data type": packetswitch_codes,
             })
 
+### has not been tested, although logic is the same as in non-generic report
 
+            # ========================
+            # MATCH OFFICE TO PACKETSWITCH (GENERIC REPORT)
+            # ========================
+            office_components = []
+
+            for i in range(len(ws_entries)):
+                ps_time = packetswitch_times[i]
+                ws_data = ws_entries[i][3]
+
+                ps_data_norm = normalize_hex_no_spaces(ws_data)
+
+                try:
+                    ps_time_obj = parse_time_flexible(ps_time)
+                except:
+                    ps_time_obj = None
+
+                matched_office = None
+
+                for office in office_entries:
+
+                    # PRIMARY: data match
+                    if office["_data_norm"] != ps_data_norm:
+                        continue
+
+                    # SECONDARY: time check
+                    if office["_time_obj"] and ps_time_obj:
+                        if minutes_abs(office["_time_obj"], ps_time_obj) <= 8:
+                            matched_office = office
+                            break
+                    else:
+                        matched_office = office
+                        break
+
+                office_val = ""
+
+                if matched_office:
+                    office_val = matched_office.get("component", "")
+
+                    if isinstance(office_val, list):
+                        office_val = [x for x in office_val if x]
+                        office_val = "\n".join(office_val) if office_val else ""
+
+                office_components.append(office_val)
+
+            packetswitch_entries_for_match = []
+
+            for i in range(len(packetswitch_times)):
+                packetswitch_entries_for_match.append({
+                    "time": packetswitch_times[i],
+                    "type": packetswitch_codes[i]
+                })
+
+            match_results = match_office_to_packetswitch(
+                office_entries,
+                packetswitch_entries_for_match
+            )
+
+            office_df = pd.DataFrame(match_results)
+
+            # Align office dataframe to main row count
+            row_count = len(cm_entries)
+
+            if len(office_df) < row_count:
+                padding = pd.DataFrame(
+                    [{"time_tag": "", "component": ""}] * (row_count - len(office_df))
+                )
+                office_df = pd.concat([office_df, padding], ignore_index=True)
+            else:
+                office_df = office_df.head(row_count)
+
+            # Rename to match your existing Excel headers
+            office_df.columns = ["time tag", "component"]
+###
 
     combined_df = pd.concat([
         pd.DataFrame({"Number": list(range(1, len(cm_df) + 1))}),
@@ -1761,13 +1865,14 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
     ws.merge_cells(start_row=1, start_column=14, end_row=1, end_column=18)
     ws.merge_cells(start_row=1, start_column=19, end_row=1, end_column=22)
     ws.merge_cells(start_row=1, start_column=23, end_row=1, end_column=24)
+    
 
 
 
-    for col in [2, 7, 8, 13, 14, 19]:
+    for col in [2, 7, 8, 13, 14, 19, 23]:
         cell = ws.cell(row=1, column=col)
         cell.alignment = Alignment(horizontal="center", vertical="center")
-    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=22):
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=24):
         for cell in row:
             cell.alignment = Alignment(horizontal="center", vertical="center")
 
@@ -1789,11 +1894,103 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
     yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
     orange_fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
     red_fill = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
+    COL_CM_TIME = 8
+    COL_CM_TYPE = 9
+    COL_CM_NUM = 10
     COL_WS_TYPE = 15
     COL_WS_NUM = 16
     last_by_group = {}
 
+    #if log_file_path != False:
+    # Build lookup: group → list of (row, msg_num, time)
+    cm_group_entries = {}
+
+    for r in range(2, ws.max_row + 1):
+        cm_type_val = ws.cell(row=r, column=COL_CM_TYPE).value
+        cm_num_val = ws.cell(row=r, column=COL_CM_NUM).value
+        cm_time_val = ws.cell(row=r, column=COL_CM_TIME).value
+
+        if not cm_type_val or not cm_num_val or not cm_time_val:
+            continue
+
+        group = _group_from_msg_type_cell(cm_type_val)
+
+        try:
+            msg_num = int(str(cm_num_val).strip(), 16)
+        except Exception:
+            continue
+
+        try:
+            time_val = parse_time_only(cm_time_val)
+        except Exception:
+            continue
+
+        cm_group_entries.setdefault(group, []).append(
+            (r, msg_num, time_val)
+        )
+
+
+    cm_last_by_group = {}
+
+    for r in range(2, ws.max_row + 1):
+        cm_type_val = ws.cell(row=r, column=COL_CM_TYPE).value
+        cm_num_val = ws.cell(row=r, column=COL_CM_NUM).value
+
+        if not cm_type_val or not cm_num_val:
+            continue
+
+        raw_type = (
+            cm_type_val.split("(")[-1].strip(")")
+            if "(" in str(cm_type_val)
+            else str(cm_type_val)
+        )
+
+        if raw_type.upper() == "08 42":
+            continue
+        if raw_type.upper() == "31 00":
+            continue
+
+        group = _group_from_msg_type_cell(cm_type_val)
+
+        try:
+            current = int(str(cm_num_val).strip(), 16)
+        except Exception:
+            continue
+
+        last = cm_last_by_group.get(group)
+
+        if last is None:
+            cm_last_by_group[group] = current
+            continue
+
+        expected = (last + 2) % 256
+
+        if current != expected:
+            ws.cell(row=r, column=COL_CM_NUM).fill = yellow_fill
+
+            prev_expected = (current - 2) % 256
+
+            found_prev = False
+
+            group_list = cm_group_entries.get(group, [])
+
+            for rr, msg_num, time_val in group_list:
+                if msg_num == prev_expected:
+                    if abs(
+                        (time_val - parse_time_only(
+                            ws.cell(row=r, column=COL_CM_TIME).value
+                        )).total_seconds()
+                    ) <= 90:
+                        found_prev = True
+                        break
+
+            if not found_prev:
+                ws.cell(row=r, column=COL_CM_NUM).fill = red_fill
+
+        cm_last_by_group[group] = current
+
     
+        
     # Build lookup: group → list of (row, msg_num, time)
     group_entries = {}
 
@@ -1876,6 +2073,7 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
     COL_PS_COMPONENT = 20
     COL_PS_DATA = 21
     COL_PS_TYPE = 22
+    COL_OFFICE_COMPONENT = 24
 
     for r in range(2, ws.max_row + 1):
 
@@ -1918,6 +2116,21 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
             last_ctrl_data = ws_data
 
 
+    office_file_provided = bool(office_entries)
+
+    for r in range(2, ws.max_row + 1):
+
+        packetswitch_type = ws.cell(r, COL_PS_TYPE).value
+        office_component = ws.cell(r, COL_OFFICE_COMPONENT).value
+
+        if (
+            office_file_provided
+            and packetswitch_type
+            and not office_component
+        ):
+            ws.cell(r, COL_OFFICE_COMPONENT).fill = red_fill    
+
+
     # Format Packetswitch component column like IXL
 
     COL_PS_COMPONENT = 20  # Packetswitch component column
@@ -1955,6 +2168,55 @@ def analyze_logs(ixl_file_path, log_file_path, pcap_file_path, ixl_excel_file_pa
 
     # Set fixed width for Packetswitch component column
     ws.column_dimensions[get_column_letter(COL_PS_COMPONENT)].width = 20
+
+    ###
+    
+
+    for r in range(2, ws.max_row + 1):
+        cell = ws.cell(row=r, column=COL_OFFICE_COMPONENT)
+        val = cell.value
+
+        # Fix list → string BEFORE processing
+        if isinstance(val, list):
+            val = val[0] if val else ""
+
+        # Clean string formatting
+        if isinstance(val, str):
+            val = val.strip("[]").strip("'").strip('"')
+
+        if val and isinstance(val, str):
+            # Replace "/" with new lines
+            parts = [p.strip() for p in val.split("/") if p.strip()]
+
+            if len(parts) > 1:
+                formatted_text = "See more ...\n" + "\n".join(parts)
+            else:
+                formatted_text = parts[0] if parts else ""
+
+            cell.value = formatted_text
+
+            # Wrap and align
+            cell.alignment = Alignment(
+                wrap_text=True,
+                horizontal="center",
+                vertical="top"
+            )
+
+    # Set fixed width for Office component column
+    ws.column_dimensions[get_column_letter(COL_OFFICE_COMPONENT)].width = 30
+
+    COL_23 = 23
+
+    for r in range(2, ws.max_row + 1):
+        cell = ws.cell(row=r, column=COL_23)
+
+        cell.alignment = Alignment(
+            wrap_text=True,
+            horizontal="center",
+            vertical="top"
+        )            
+
+    ###
 
     # Set fixed row height for better readability
     for r in range(2, ws.max_row + 1):
