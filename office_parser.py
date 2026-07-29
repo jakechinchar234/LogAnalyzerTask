@@ -8,6 +8,7 @@ def parse_time(timestr):
 
 
 # -------- LINE PARSER --------
+
 def parse_office_line(line):
     """
     Extract:
@@ -20,8 +21,7 @@ def parse_office_line(line):
     line = line.replace("&nbsp;", " ")
 
     # Collapse excessive spaces but preserve double-space structure
-    # (we'll split manually instead of full collapse)
-    raw_parts = line.split("  ")  # split only on double spaces
+    raw_parts = line.split("  ")
 
     # Remove empty chunks
     raw_parts = [p.strip() for p in raw_parts if p.strip()]
@@ -30,9 +30,6 @@ def parse_office_line(line):
         return None
 
     try:
-        # Example structure:
-        # [T2GE 01:00:01, 03.03.25 01:00:00, PLANTERS, RANTLMNT, DEVTO PCD2, ...]
-
         first_block = raw_parts[0]
         second_block = raw_parts[1]
 
@@ -43,83 +40,8 @@ def parse_office_line(line):
         second_time = second_block.split()[1]
 
         # --- COMPONENT ---
-        component = raw_parts[4]
-
-        # ========================
-        # SPECIAL INDICATION FORMATS
-        # ========================
-
-        # Example:
-        # Door Alm Indicates Closed
-        # -> Door Alm off
-
-        if "Indicates" in component:
-            parts = component.split()
-
-            try:
-                idx = parts.index("Indicates")
-
-                device_name = " ".join(parts[:idx])
-
-                if idx + 1 < len(parts):
-                    state = parts[idx + 1].rstrip(".").lower()
-
-                    if state == "closed":
-                        component = f"{device_name} off"
-                    elif state == "open":
-                        component = f"{device_name} on"
-                    else:
-                        component = device_name
-
-            except Exception:
-                pass
-
-
-        elif "Local Control Inds" in component:
-            parts = component.split()
-
-            try:
-                idx = parts.index("Inds")
-
-                device_name = " ".join(parts[:idx])
-
-                if idx + 1 < len(parts):
-                    state = parts[idx + 1].rstrip(".").lower()
-
-                    if state == "off":
-                        component = f"{device_name} off"
-                    elif state == "on":
-                        component = f"{device_name} on"
-                    else:
-                        component = device_name
-
-            except Exception:
-                pass
-
-        # Example:
-        # ... CO IND RESET
-        # -> component off
-        #
-        # ... CO IND SET
-        # -> component on
-
-        elif "BACK TO TRAIN CO IND" or "CODED BLOCK IND IS" or "SWITCH NORMAL IND" or "SWITCH REVERSE IND" in line.upper():
-
-            upper_line = line.upper()
-
-            if " RESET" in upper_line:
-                component = f"{component} off"
-            elif " SET" in upper_line:
-                component = f"{component} on"
-
-        elif "SWITCH OVERLOAD" in line.upper():
-
-            upper_line = line.upper()
-
-            if " FAILED" in upper_line:
-                component = f"{component} on"
-            elif " RESTORED" in upper_line:
-                component = f"{component} off"
+        component = " ".join(raw_parts[4:])
+        component = re.sub(r'^No\s+', '', component, flags=re.IGNORECASE)
 
         return {
             "display_time": first_time,
@@ -130,6 +52,7 @@ def parse_office_line(line):
 
     except Exception:
         return None
+
 
 
 # -------- FILE PARSER --------
@@ -217,8 +140,26 @@ def match_office_to_packetswitch(office_entries, packetswitch_entries):
                         or "SWITCH NORMAL IND" in office["full_line"].upper()
                         or "SWITCH REVERSE IND" in office["full_line"].upper()
                         or "SWITCH OVERLOAD" in office["full_line"].upper()
+                        or "SWITCH FLD LOCK IND" in office["full_line"].upper()
+                        or "TIMING IND IS" in office["full_line"].upper()
+                        or "CLEAR IND IS" in office["full_line"].upper()
                     ):
-                        matched_components.append(office["component"])
+                        
+                        component_text = office["component"]
+
+                        # Skip switch indication state messages
+                        if (
+                            "Indicates Normal" in component_text
+                            or "Indicates Reverse" in component_text
+                            or "DK" in component_text
+                        ):
+                            continue
+
+
+                        component_text = clean_component(office["component"])
+
+                        matched_components.append(component_text)
+
 
                         if not matched_time:
                             matched_time = office["display_time"]
@@ -226,11 +167,27 @@ def match_office_to_packetswitch(office_entries, packetswitch_entries):
 
 
                 elif ps_type == "Control":
-                    if "Signal Request" in office["full_line"]:
-                        matched_components.append(office["component"])
+                    if ("Signal Request" in office["full_line"]
+                        or "NORMAL REQUEST IS" in office["full_line"].upper()
+                        or "REVERSE REQUEST IS" in office["full_line"].upper()
+                        ):
+                        
+                        component_text = clean_component(office["component"])
+
+                        matched_components.append(component_text)
+
 
                         if not matched_time:
                             matched_time = office["display_time"]
+
+                elif ps_type == "Recall":
+                    if ("Remote Recall cmd" in office["full_line"]
+                        or "RESEND CONTROLS CMD" in office["full_line"].upper()
+                        or "REVERSE REQUEST IS" in office["full_line"].upper()                        
+                        ):
+                        component_text = clean_component(office["component"])
+
+                        matched_components.append(component_text)
 
 
 
@@ -242,3 +199,38 @@ def match_office_to_packetswitch(office_entries, packetswitch_entries):
 
 
     return results
+
+
+def clean_component(component):
+    """
+    Remove trailing source identifiers such as:
+    EVA rtc3
+    DDM utB
+    after the meaningful state word.
+    """
+
+    ending_patterns = [
+        r"(.*?\bVacated\b).*",
+        r"(.*?\bOccupied\b).*",
+        r"(.*?\bReset\b).*",
+        r"(.*?\bSet\b).*",
+        r"(.*?\bOpen\b).*",
+        r"(.*?\bClosed\b).*",
+        r"(.*?\bOn\b).*",
+        r"(.*?\bOff\b).*",
+        r"(.*?\bRestored\b).*",
+        r"(.*?\bFailed\b).*",
+        r"(.*?\bClear\b).*",
+        r"(.*?\bStop\b).*",
+        r"(.*?\bapp\b).*",
+        r"(.*?\bdisp\b).*",
+        r"(.*?\bRecall cmd\b).*",
+        
+    ]
+
+    for pattern in ending_patterns:
+        m = re.match(pattern, component, flags=re.IGNORECASE)
+        if m:
+            return m.group(1)
+
+    return component
